@@ -9,7 +9,7 @@ command = "cargo install -q worker-build && worker-build --release"
 [vars]
 PUBLIC_URL = "https://badi-cloud.faisalmashuri16.workers.dev"
 GOOGLE_CLIENT_ID = "905981309985-ng04qcnc94pckpvc0unids6cu1l3ehc0.apps.googleusercontent.com"
-MIDTRANS_PRODUCTION = "0"
+MIDTRANS_PRODUCTION = "1"
 # The closed beta: "1" lets in only the emails on the invite list (admin API), each with the beta credit.
 # "0" (production): any Google account signs in on Free.
 BETA = "0"
