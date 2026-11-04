@@ -1,0 +1,14 @@
+[workspace]
+resolver = "2"
+members = ["crates/*"]
+# The Cloudflare Worker builds for wasm32 with wrangler, outside this workspace.
+exclude = ["cloud"]
+
+[workspace.package]
+version = "1.0.0"
+edition = "2024"
+license = "MIT"
+authors = ["Faisal Mashuri"]
+
+[workspace.dependencies]
+serde_json = { version = "1", features = ["preserve_order"] }

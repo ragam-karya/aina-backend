@@ -1,0 +1,23 @@
+[package]
+name = "badi-cloud"
+description = "Badi Cloud on Cloudflare Workers: accounts, plans and limits, Midtrans billing, and the proxy that holds the AI and Composio keys"
+version = "2.0.0-alpha.1"
+edition = "2024"
+license = "MIT"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+worker = { version = "0.8.7", features = ["d1"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+futures-util = "0.3"
+futures-channel = "0.3"
+base64 = "0.22"
+badi-cloud-core = { path = "../crates/badi-cloud-core" }
+
+[profile.release]
+lto = true
+opt-level = "s"
+codegen-units = 1

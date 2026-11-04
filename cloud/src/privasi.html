@@ -1,0 +1,69 @@
+<!doctype html>
+<html lang="id">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Kebijakan Privasi aina</title>
+<link href="https://fonts.googleapis.com/css2?family=Urbanist:wght@400;600;700&amp;display=swap" rel="stylesheet">
+<style>
+  :root { color-scheme: light dark; --ink: #1d2130; --mute: #5b6275; --bg: #ffffff; --line: #e3e6ee; }
+  @media (prefers-color-scheme: dark) { :root { --ink: #e8eaf2; --mute: #a3a9bb; --bg: #10131c; --line: #262b3a; } }
+  body { margin: 0; background: var(--bg); color: var(--ink); font: 16px/1.65 Urbanist, system-ui, "Segoe UI", sans-serif; }
+  main { max-width: 760px; margin: 0 auto; padding: 40px 16px 80px; }
+  h1 { font-size: 30px; margin: 0 0 4px; } h2 { font-size: 20px; margin-top: 32px; }
+  .meta, small { color: var(--mute); } table { border-collapse: collapse; width: 100%; } td, th { border-bottom: 1px solid var(--line); padding: 8px 6px; text-align: left; vertical-align: top; }
+  .draft { border: 1px solid #e0a800; border-radius: 8px; padding: 10px 14px; background: rgba(224,168,0,.08); }
+</style>
+</head>
+<body>
+<main>
+<h1>Kebijakan Privasi aina</h1>
+<p class="meta">Berlaku untuk aina Cloud (akun berlangganan) · Versi draf, 19 Oktober 2026</p>
+<p class="draft">Draf ini disusun mengikuti UU No. 27 Tahun 2022 tentang Pelindungan Data Pribadi dan wajib ditinjau konsultan hukum sebelum aina Cloud dibuka untuk umum.</p>
+
+<h2>1. Siapa kami</h2>
+<p>aina ("aina") adalah aplikasi pendamping di Windows yang melihat layar saat kamu bertanya, menunjuk, memandu, dan bisa mengerjakan tugas atas izinmu. Pengendali data untuk aina Cloud adalah pengembang aina (kontak: <a href="mailto:privasi@badi.id">privasi@badi.id</a>).</p>
+
+<h2>2. Data yang kami proses</h2>
+<table>
+<tr><th>Data</th><th>Untuk apa</th><th>Disimpan?</th></tr>
+<tr><td>Alamat email dari akun Google-mu (tanpa nama, foto, atau data Google lain)</td><td>Masuk akun dan tagihan</td><td>Ya, selama akun ada</td></tr>
+<tr><td>Paket, akhir siklus langganan, dan saldo kredit (langganan dan Top-Up), serta tanda PC yang sudah mendapat kredit gratis (hash, bukan ID PC-nya)</td><td>Menghitung dan memotong kredit</td><td>Ya, angka total saja</td></tr>
+<tr><td>Riwayat pembayaran (nomor pesanan, paket, jumlah, status)</td><td>Akuntansi dan kewajiban pajak</td><td>Ya, sesuai ketentuan perpajakan</td></tr>
+<tr><td>Pertanyaan, transkrip suara, tangkapan layar, isi file yang dikerjakan, dan jawaban</td><td>Dikirim ke penyedia AI untuk menjawab</td><td><b>Tidak.</b> Hanya melewati server kami saat itu juga</td></tr>
+<tr><td>Data aplikasi kerja (email, kalender, dokumen, dsb.)</td><td>Dibaca atau diubah lewat Composio atas perintah dan izinmu</td><td><b>Tidak</b> di server kami. Token login aplikasi disimpan oleh Composio</td></tr>
+</table>
+<p>Di PC-mu, aina hanya menyimpan pengaturan dan apa yang kamu minta simpan (lihat dokumentasi aplikasi). Rekaman suara dan tangkapan layar hanya ada di memori.</p>
+
+<h2>3. Dasar pemrosesan</h2>
+<p>Kami memproses data atas dasar persetujuanmu saat mendaftar dan untuk melaksanakan perjanjian langganan. Kamu bisa menarik persetujuan kapan saja dengan menghapus akun.</p>
+
+<h2>4. Pemroses data pihak ketiga</h2>
+<table>
+<tr><th>Penyedia</th><th>Peran</th></tr>
+<tr><td>Anthropic (Claude)</td><td>Memahami layar dan pertanyaan, menyusun jawaban dan tindakan</td></tr>
+<tr><td>OpenAI</td><td>Mengubah suara jadi teks, dan suara standar aina</td></tr>
+<tr><td>ElevenLabs</td><td>Suara aina (pilihan default di semua paket)</td></tr>
+<tr><td>Composio</td><td>Menghubungkan aplikasi kerja (Gmail, Kalender, Notion, Slack, dll.)</td></tr>
+<tr><td>Midtrans</td><td>Pembayaran (QRIS, e-wallet, virtual account, kartu)</td></tr>
+<tr><td>Google</td><td>Login akun (hanya alamat email yang terverifikasi)</td></tr>
+</table>
+<p>Sebagian penyedia memproses data di luar Indonesia. Kami memilih penyedia yang tidak memakai data API pelanggan untuk melatih model, sesuai ketentuan mereka masing-masing.</p>
+
+<h2>5. Hak kamu</h2>
+<ul>
+<li>Melihat data akunmu di Settings → Akun.</li>
+<li>Menghapus akun dan data yang terkait dari Settings → Akun (tombol "Hapus akun"), atau lewat email ke kami. Data pembayaran disimpan terpisah tanpa akun selama diwajibkan aturan pajak.</li>
+<li>Memutus aplikasi kerja kapan saja di Settings → Aplikasi kerja.</li>
+<li>Mengajukan keberatan atau pertanyaan ke <a href="mailto:privasi@badi.id">privasi@badi.id</a>. Kami menjawab paling lambat 3×24 jam pada hari kerja.</li>
+</ul>
+
+<h2>6. Keamanan</h2>
+<p>Koneksi memakai HTTPS. Kode masuk sekali pakai dan token perangkat hanya disimpan dalam bentuk hash. Key penyedia AI hanya ada di server, tidak pernah di aplikasimu. Jika terjadi kegagalan pelindungan data, kami memberi tahu pengguna yang terdampak dan lembaga yang berwenang paling lambat 3×24 jam sejak diketahui.</p>
+
+<h2>7. Perubahan</h2>
+<p>Perubahan kebijakan diumumkan di aplikasi dan di halaman ini sebelum berlaku.</p>
+<p><small>Lihat juga <a href="/ketentuan">Ketentuan Layanan</a>.</small></p>
+</main>
+</body>
+</html>

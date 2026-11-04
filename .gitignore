@@ -1,0 +1,9 @@
+target/
+build/
+.wrangler/
+node_modules/
+.dev.vars
+.dev.vars.*
+.env
+.env.*
+*.log

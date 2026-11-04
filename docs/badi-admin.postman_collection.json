@@ -1,0 +1,91 @@
+{
+  "info": {
+    "name": "Badi Cloud Admin",
+    "description": "Daftar paket (tabel plans), tarif kredit, undangan beta, dan kredit. Contoh di sini memakai alamat sales@badi.id sebagai contoh saja; ganti dengan kontak sungguhan. Isi variabel koleksi adminToken (= secret ADMIN_TOKEN di Worker). Semua request memakai Authorization: Bearer {{adminToken}}.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "auth": {
+    "type": "bearer",
+    "bearer": [{ "key": "token", "value": "{{adminToken}}", "type": "string" }]
+  },
+  "variable": [
+    { "key": "baseUrl", "value": "https://badi-cloud.faisalmashuri16.workers.dev" },
+    { "key": "adminToken", "value": "" }
+  ],
+  "item": [
+    {
+      "name": "Lihat undangan + sisa kredit",
+      "request": { "method": "GET", "url": "{{baseUrl}}/admin/beta" }
+    },
+    {
+      "name": "Tambah undangan",
+      "request": {
+        "method": "POST",
+        "url": "{{baseUrl}}/admin/beta",
+        "header": [{ "key": "Content-Type", "value": "application/json" }],
+        "body": { "mode": "raw", "raw": "{\n  \"emails\": [\"teman1@gmail.com\", \"teman2@gmail.com\"],\n  \"note\": \"batch 1\"\n}" }
+      }
+    },
+    {
+      "name": "Hapus undangan (akun beta-nya berhenti)",
+      "request": { "method": "DELETE", "url": { "raw": "{{baseUrl}}/admin/beta?email=teman1@gmail.com", "host": ["{{baseUrl}}"], "path": ["admin", "beta"], "query": [{ "key": "email", "value": "teman1@gmail.com" }] } }
+    },
+    {
+      "name": "Tambah kredit",
+      "request": {
+        "method": "POST",
+        "url": "{{baseUrl}}/admin/credit",
+        "header": [{ "key": "Content-Type", "value": "application/json" }],
+        "body": { "mode": "raw", "raw": "{\n  \"email\": \"teman1@gmail.com\",\n  \"credits\": 50\n}" }
+      }
+    },
+    {
+      "name": "Lihat paket + tarif kredit",
+      "request": { "method": "GET", "url": "{{baseUrl}}/admin/plans" }
+    },
+    {
+      "name": "Ubah paket (harga, kredit, badge, aktif)",
+      "request": {
+        "method": "PUT",
+        "url": "{{baseUrl}}/admin/plans",
+        "header": [{ "key": "Content-Type", "value": "application/json" }],
+        "body": { "mode": "raw", "raw": "{\n  \"id\": \"pro\",\n  \"price\": 129000,\n  \"credits\": 225,\n  \"badge\": \"Best Value\",\n  \"active\": true\n}" }
+      }
+    },
+    {
+      "name": "Tambah paket baru",
+      "request": {
+        "method": "PUT",
+        "url": "{{baseUrl}}/admin/plans",
+        "header": [{ "key": "Content-Type", "value": "application/json" }],
+        "body": { "mode": "raw", "raw": "{\n  \"id\": \"topup_mini\",\n  \"name\": \"Top-Up Mini\",\n  \"kind\": \"topup\",\n  \"price\": 19000,\n  \"credits\": 22,\n  \"sort\": 25\n}" }
+      }
+    },
+    {
+      "name": "Login atas nama B.A.D.I.: status + redirect URI",
+      "request": { "method": "GET", "url": "{{baseUrl}}/admin/composio" }
+    },
+    {
+      "name": "Login atas nama B.A.D.I.: pasang OAuth app provider",
+      "request": {
+        "method": "POST",
+        "url": "{{baseUrl}}/admin/composio",
+        "header": [{ "key": "Content-Type", "value": "application/json" }],
+        "body": { "mode": "raw", "raw": "{\n  \"provider\": \"google\",\n  \"clientId\": \"\",\n  \"clientSecret\": \"\",\n  \"viaBadi\": false\n}" }
+      }
+    },
+    {
+      "name": "Login atas nama B.A.D.I.: kembali ke Composio",
+      "request": { "method": "DELETE", "url": { "raw": "{{baseUrl}}/admin/composio?provider=google", "host": ["{{baseUrl}}"], "path": ["admin", "composio"], "query": [{ "key": "provider", "value": "google" }] } }
+    },
+    {
+      "name": "Ubah tarif kredit + kontak Enterprise",
+      "request": {
+        "method": "PUT",
+        "url": "{{baseUrl}}/admin/settings",
+        "header": [{ "key": "Content-Type", "value": "application/json" }],
+        "body": { "mode": "raw", "raw": "{\n  \"rupiahPerCredit\": 170,\n  \"enterpriseContact\": \"mailto:sales@badi.id\"\n}" }
+      }
+    }
+  ]
+}

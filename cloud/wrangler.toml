@@ -1,0 +1,38 @@
+# Badi Cloud on Cloudflare Workers (Rust → WebAssembly with worker-build).
+name = "badi-cloud"
+main = "build/worker/shim.mjs"
+compatibility_date = "2026-10-01"
+
+[build]
+command = "cargo install -q worker-build && worker-build --release"
+
+[vars]
+PUBLIC_URL = "https://badi-cloud.faisalmashuri16.workers.dev"
+GOOGLE_CLIENT_ID = "905981309985-ng04qcnc94pckpvc0unids6cu1l3ehc0.apps.googleusercontent.com"
+MIDTRANS_PRODUCTION = "0"
+# The closed beta: "1" lets in only the emails on the invite list (admin API), each with the beta credit.
+# "0" (production): any Google account signs in on Free.
+BETA = "0"
+# Accounts that use Badi without limits (never charged, buy nothing), comma-separated. Applied at sign-in.
+UNLIMITED_EMAILS = "faisalmashuri16@gmail.com"
+
+# The Windows installer for /download (object windows/latest; uploaded per release, see README).
+[[r2_buckets]]
+binding = "DOWNLOADS"
+bucket_name = "badi-downloads"
+
+# Daily at 08:00 WIB: settle pending payments, then renew card subscriptions that are due.
+[triggers]
+crons = ["0 1 * * *"]
+
+[[d1_databases]]
+binding = "DB"
+database_name = "badi-cloud"
+database_id = "ac19a76a-76ff-4d73-b13d-bb2aab5d856c"
+migrations_dir = "migrations"
+
+# Secrets (never in this file): wrangler secret put <NAME>
+#   ANTHROPIC_API_KEY, OPENAI_API_KEY, ELEVENLABS_API_KEY, COMPOSIO_API_KEY (ak_…),
+#   COMPOSIO_AUTH_CONFIGS (JSON, optional white-label), MIDTRANS_SERVER_KEY (sandbox SB-Mid-server-… first),
+#   GOOGLE_CLIENT_SECRET
+#   ADMIN_TOKEN: the key for the admin API (/admin/beta, /admin/credit), at least 24 characters.
