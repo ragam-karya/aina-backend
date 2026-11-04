@@ -21,6 +21,9 @@ pub struct Account {
     /// The free starter was given to this account.
     pub free_claimed: bool,
     pub renewal: Renewal,
+    /// Why the account is restricted (a chargeback, an admin's call), or None. A restricted account can
+    /// only see itself, sign out and delete itself; every paid call is refused.
+    pub suspended: Option<String>,
 }
 
 /// A subscription paid by credit card renews itself with the card Midtrans saved (only its token is
@@ -45,6 +48,18 @@ pub const RENEW_GRACE_MS: i64 = 3 * crate::plans::DAY_MS;
 /// The plan of an account that uses Badi without limits (the owner's, set by email): never refused,
 /// never charged, buys nothing.
 pub const UNLIMITED: &str = "owner";
+
+/// How far past zero a task that began with credits may still go (milli-credits). Beyond it every call
+/// is refused, task or not, until the debt is paid.
+pub const OVERDRAFT: i64 = 5 * MILLI;
+/// Paid calls one account may have running at once (parallel calls can't all start on the last credit).
+pub const MAX_INFLIGHT: i64 = 4;
+/// A running call's slot frees itself after this, should the Worker never release it.
+pub const INFLIGHT_MS: i64 = 10 * 60_000;
+/// A task id as the app sends it in x-badi-task: 1 to 64 letters, digits, `-` or `_`.
+pub fn valid_task(s: &str) -> bool {
+    (1..=64).contains(&s.len()) && s.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+}
 
 impl Account {
     pub fn unlimited(&self) -> bool {
@@ -98,6 +113,7 @@ impl Account {
         };
         json!({
             "email": self.email,
+            "suspended": self.suspended.is_some(),
             "plan": if sub.is_some() { self.plan.as_str() } else if self.plan == "beta" { "beta" } else { "free" },
             "planName": name,
             "subscribed": sub.is_some(),
@@ -117,6 +133,8 @@ impl Account {
                 "subscription": whole(sub_left),
                 "subscriptionTotal": sub.map(|p| p.credits).unwrap_or(0),
                 "topup": whole(self.meter.topup),
+                // Credits owed (a call that ended past zero), repaid first by the next purchase.
+                "owed": if left < 0 { (-left + MILLI - 1) / MILLI } else { 0 },
                 "low": left < low_at,
                 "out": left <= 0,
             },
@@ -148,10 +166,19 @@ impl Refusal {
     }
 }
 
+/// The refusal for a restricted account.
+pub fn suspended() -> Refusal {
+    Refusal::new(403, "account_suspended", "Akun aina ini dibatasi. Hubungi tim aina untuk membukanya lagi.")
+}
+
 /// May this account start a call? It needs credits left; `continuing`: its task began with credits and
-/// may finish.
+/// may finish, but never more than OVERDRAFT past zero. A restricted account starts nothing.
 pub fn admit(a: &Account, c: &Catalog, continuing: bool, now: i64) -> Result<(), Refusal> {
-    if continuing || a.unlimited() || a.left(c, now) > 0 {
+    if a.suspended.is_some() {
+        return Err(suspended());
+    }
+    let left = a.left(c, now);
+    if a.unlimited() || left > 0 || (continuing && left > -OVERDRAFT) {
         return Ok(());
     }
     let msg = if a.plan == "beta" {
@@ -167,6 +194,9 @@ pub fn admit(a: &Account, c: &Catalog, continuing: bool, now: i64) -> Result<(),
 /// May this account use the work apps (Composio)? They are for paying accounts: a subscription running,
 /// or credits left after a paid purchase (`has_paid`). The free starter alone doesn't open them.
 pub fn admit_apps(a: &Account, c: &Catalog, has_paid: bool, now: i64) -> Result<(), Refusal> {
+    if a.suspended.is_some() {
+        return Err(suspended());
+    }
     if a.unlimited() || a.subscription(c, now).is_some() || has_paid {
         return Ok(());
     }
@@ -176,6 +206,9 @@ pub fn admit_apps(a: &Account, c: &Catalog, has_paid: bool, now: i64) -> Result<
 /// May this account buy this item now? Subscriptions can't be renewed or switched before the cycle ends
 /// (credits running out is what top-ups are for); Enterprise is by contact; the beta buys nothing.
 pub fn can_buy<'a>(a: &Account, c: &'a Catalog, item: &str, now: i64) -> Result<&'a Plan, Refusal> {
+    if a.suspended.is_some() {
+        return Err(suspended());
+    }
     if a.plan == "beta" {
         return Err(Refusal::new(403, "plan_limit", "Selama beta, paket dan Top-Up belum bisa dibeli."));
     }
@@ -223,6 +256,32 @@ pub fn purchase(a: &Account, p: &Plan, now: i64) -> (String, i64, i64, i64) {
     match p.kind {
         Kind::Subscription => (p.id.clone(), now + p.days.max(1) * crate::plans::DAY_MS, p.credits * MILLI, a.meter.topup),
         _ => (a.plan.clone(), a.plan_until, a.meter.sub_left, a.meter.topup + p.credits * MILLI),
+    }
+}
+
+/// A Midtrans status that takes back a payment already delivered: Some(whether the account is also
+/// restricted). A chargeback is the payer disputing it, so the account stops; a refund (or a capture
+/// cancelled or denied after the fact) only takes the credits back.
+pub fn reversal(status: &str) -> Option<bool> {
+    match status {
+        "chargeback" | "partial_chargeback" => Some(true),
+        "refund" | "partial_refund" | "cancel" | "deny" => Some(false),
+        _ => None,
+    }
+}
+
+/// What a reversed payment of `p` takes back: (sub_left, topup, plan_until). A top-up's credits come off
+/// the balance (into debt if already spent); the subscription it paid for ends now, and what its cycle
+/// already used becomes debt. A plan the account no longer runs changes nothing.
+pub fn claw_back(a: &Account, p: &Plan, now: i64) -> (i64, i64, i64) {
+    let (sub, top, until) = (a.meter.sub_left, a.meter.topup, a.plan_until);
+    match p.kind {
+        Kind::Topup => (sub, top - p.credits * MILLI, until),
+        Kind::Subscription if a.plan == p.id && until > now => {
+            let used = (p.credits * MILLI - sub.max(0)).max(0);
+            (0, top - used, now)
+        }
+        _ => (sub, top, until),
     }
 }
 
@@ -404,7 +463,9 @@ pub fn composio_route(method: &str, path: &str, body: &Value, a: &Account, auth_
             ComposioRoute::NewSession(body)
         }
         (_, ["tool_router", "session", id, ..]) => ComposioRoute::Session(id.to_string()),
-        ("GET" | "DELETE", ["connected_accounts", id]) => ComposioRoute::LinkedAccount(id.to_string()),
+        ("GET" | "DELETE", ["connected_accounts", id]) if valid_composio_id(id) => ComposioRoute::LinkedAccount(id.to_string()),
+        // A tool run on a linked account names it; it must be the account's own (checked by the Worker).
+        ("POST", ["tools", "execute", _]) if body.get("connected_account_id").is_some_and(|v| !v.as_str().is_some_and(valid_composio_id)) => ComposioRoute::Deny,
         ("POST", ["files", "upload", "request"]) | ("GET", ["tools", _]) => ComposioRoute::Pass,
         ("POST", ["tools", "execute", _]) => {
             body["user_id"] = json!(a.composio_user);
@@ -413,6 +474,11 @@ pub fn composio_route(method: &str, path: &str, body: &Value, a: &Account, auth_
         // White-label sign-in is set up on the server, not per user.
         _ => ComposioRoute::Deny,
     }
+}
+
+/// A Composio id (ca_…, trs_…) safe to put in a path: letters, digits, `_` and `-` only.
+pub fn valid_composio_id(s: &str) -> bool {
+    (1..=100).contains(&s.len()) && s.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
 }
 
 pub fn not_found() -> Refusal {
@@ -428,7 +494,42 @@ mod tests {
     const NOW: i64 = 1_792_398_000_000;
 
     fn account(plan: &str, until: i64, sub_left: i64, topup: i64) -> Account {
-        Account { id: 1, email: "a@b.id".into(), plan: plan.into(), plan_until: until, composio_user: "badi_x".into(), meter: Meter { sub_left, topup }, free_claimed: false, renewal: Renewal::default() }
+        Account { id: 1, email: "a@b.id".into(), plan: plan.into(), plan_until: until, composio_user: "badi_x".into(), meter: Meter { sub_left, topup }, free_claimed: false, renewal: Renewal::default(), suspended: None }
+    }
+
+    #[test]
+    fn a_task_may_finish_only_a_little_past_zero() {
+        let c = Catalog::defaults();
+        // Past zero, a running task may go on up to the overdraft, never further, and a new one can't start.
+        assert!(admit(&account("free", 0, 0, -1_000), &c, true, NOW).is_ok());
+        assert!(admit(&account("free", 0, 0, -1_000), &c, false, NOW).is_err());
+        assert_eq!(admit(&account("free", 0, 0, -OVERDRAFT), &c, true, NOW).unwrap_err().kind, "credits_out");
+        assert_eq!(account("free", 0, 0, -2_500).view(&c, NOW)["credits"]["owed"], 3);
+        assert!(valid_task("task-1_a") && !valid_task("") && !valid_task(&"a".repeat(65)) && !valid_task("a b"));
+    }
+
+    #[test]
+    fn a_restricted_account_is_refused_everything_paid() {
+        let c = Catalog::defaults();
+        let a = Account { suspended: Some("chargeback".into()), ..account("pro", NOW + DAY_MS, 100_000, 50_000) };
+        assert_eq!(admit(&a, &c, true, NOW).unwrap_err().kind, "account_suspended");
+        assert!(admit_apps(&a, &c, true, NOW).is_err() && can_buy(&a, &c, "topup_small", NOW).is_err());
+        assert_eq!(a.view(&c, NOW)["suspended"], true);
+    }
+
+    #[test]
+    fn a_reversed_payment_takes_its_credits_back() {
+        let c = Catalog::defaults();
+        assert_eq!((reversal("chargeback"), reversal("refund"), reversal("settlement"), reversal("expire")), (Some(true), Some(false), None, None));
+        // A top-up of 65 credits, 60 already spent: 5 left, minus 65 = 60 owed.
+        let (sub, top, _) = claw_back(&account("free", 0, 0, 5_000), c.get("topup_small").unwrap(), NOW);
+        assert_eq!((sub, top), (0, -60_000));
+        // Pro with 25 of its 225 credits left: the cycle ends now and the 200 used are owed.
+        let (sub, top, until) = claw_back(&account("pro", NOW + 9 * DAY_MS, 25_000, 10_000), c.get("pro").unwrap(), NOW);
+        assert_eq!((sub, top, until), (0, -190_000, NOW));
+        // A cycle that already ended (or another plan) is left alone.
+        let a = account("basic", NOW + DAY_MS, 1_000, 0);
+        assert_eq!(claw_back(&a, c.get("pro").unwrap(), NOW), (1_000, 0, NOW + DAY_MS));
     }
 
     #[test]
@@ -497,7 +598,7 @@ mod tests {
         let c = Catalog::defaults();
         let v = account("pro", NOW + DAY_MS, 30_500, 12_000).view(&c, NOW);
         assert_eq!((v["planName"].as_str(), v["subscribed"].as_bool(), v["canSubscribe"].as_bool()), (Some("Pro"), Some(true), Some(false)));
-        assert_eq!(v["credits"], json!({ "left": 42, "subscription": 30, "subscriptionTotal": 225, "topup": 12, "low": true, "out": false }));
+        assert_eq!(v["credits"], json!({ "left": 42, "subscription": 30, "subscriptionTotal": 225, "topup": 12, "owed": 0, "low": true, "out": false }));
         let v = account("pro", NOW - 1, 30_500, 0).view(&c, NOW);
         assert_eq!((v["plan"].as_str(), v["planName"].as_str(), v["credits"]["left"].as_i64(), v["credits"]["out"].as_bool()), (Some("free"), Some("Free"), Some(0), Some(true)));
     }
@@ -603,6 +704,11 @@ mod tests {
         assert_eq!(composio_route("DELETE", "connected_accounts/ca_1", &Value::Null, &a, &mine), ComposioRoute::LinkedAccount("ca_1".into()));
         let ComposioRoute::Execute(b) = composio_route("POST", "tools/execute/GOOGLEDRIVE_UPLOAD_FILE", &json!({ "user_id": "victim" }), &a, &mine) else { panic!() };
         assert_eq!(b["user_id"], "badi_x");
+        let ComposioRoute::Execute(b) = composio_route("POST", "tools/execute/GMAIL_SEND", &json!({ "connected_account_id": "ca_1" }), &a, &mine) else { panic!() };
+        assert_eq!(b["connected_account_id"], "ca_1", "the Worker checks it is the account's own");
+        assert_eq!(composio_route("POST", "tools/execute/GMAIL_SEND", &json!({ "connected_account_id": "../auth_configs" }), &a, &mine), ComposioRoute::Deny);
+        assert_eq!(composio_route("POST", "tools/execute/GMAIL_SEND", &json!({ "connected_account_id": 7 }), &a, &mine), ComposioRoute::Deny);
+        assert_eq!(composio_route("GET", "connected_accounts/ca_1%3Fx", &Value::Null, &a, &mine), ComposioRoute::Deny);
         assert_eq!(composio_route("POST", "auth_configs", &json!({}), &a, &mine), ComposioRoute::Deny);
         assert_eq!(composio_route("GET", "connected_accounts", &json!({}), &a, &mine), ComposioRoute::Deny, "no listing other people's accounts");
     }
