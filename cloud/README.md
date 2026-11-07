@@ -6,7 +6,7 @@ Akun berlangganan untuk B.A.D.I.:
 - Kredit: langganan Basic/Pro (30 hari, sisa hangus di akhir siklus) dan Top-Up Small/Medium/Large (tidak hangus). Daftar harga di tabel `plans` (`migrations/0003_credits.sql`), 1 kredit = Rp170 biaya API. Tidak ada batas sesi atau mingguan.
 - Pembayaran lewat Midtrans (Snap). Langganan yang dibayar kartu kredit menyimpan kartu di Midtrans (Badi hanya memegang `saved_token_id`) dan diperpanjang otomatis oleh cron harian worker (08:00 WIB, `/v2/charge` dengan token; ditolak → dicoba lagi tiap hari sampai 3x dengan masa tenggang 3 hari). User membatalkan/mengaktifkan lagi/menghapus kartu di Settings → Akun (`/v1/subscription/cancel|resume`, `DELETE /v1/subscription/card`). QRIS, VA, e-wallet: sekali bayar.
   - Dashboard Midtrans → Settings → Configuration: *Payment Notification URL* = `https://<worker>/v1/billing/midtrans`. Notifikasi yang hilang tetap tertangani: order `pending` dicek ke `/v2/{order}/status` saat app membaca akun dan oleh cron.
-  - **Langganan dari web** (tanpa app): halaman `/masuk`, `/langganan`, `/terima-kasih` ada di website (`FRONTEND_URL`, repo `aina-web`), yang memanggil Worker ini lewat proxy `/api/*` (service binding). Alur: `aina.ai.id/masuk` → `/api/login?next=/langganan` (set cookie nonce `badi_login`) → Google → `PUBLIC_URL/auth/google/callback` (tidak berubah) → `aina.ai.id/api/auth/finish?code=…` (kode sekali pakai + nonce yang sama) → cookie sesi `badi_session` (HttpOnly, Secure, SameSite=Lax; token `bct_` berlabel `web`) di domain website → `GET /v1/account`, `GET /v1/plans`, `POST /v1/checkout` → Snap → `aina.ai.id/terima-kasih?order_id=…` (`callbacks.finish` per transaksi) → `GET /v1/orders/{id}`. Path lama di Worker (`/masuk`, `/langganan`, `/terima-kasih`) redirect ke website. Kredit gratis tetap hanya dari login pertama lewat app di PC. Panggilan bercookie selain GET wajib `Origin` = `PUBLIC_URL` atau `FRONTEND_URL`.
+  - **Langganan dari web** (tanpa app): halaman `/masuk`, `/langganan`, `/terima-kasih` ada di website (`FRONTEND_URL`, repo `aina-web`), yang memanggil Worker ini lewat proxy `/api/*` (service binding). Alur: `aina.ai.id/masuk` → `/api/login?next=/langganan` (set cookie nonce `badi_login`) → Google → `FRONTEND_URL/api/auth/google/callback` (lewat proxy ke `/auth/google/callback`) → `aina.ai.id/api/auth/finish?code=…` (kode sekali pakai + nonce yang sama) → cookie sesi `badi_session` (HttpOnly, Secure, SameSite=Lax; token `bct_` berlabel `web`) di domain website → `GET /v1/account`, `GET /v1/plans`, `POST /v1/checkout` → Snap → `aina.ai.id/terima-kasih?order_id=…` (`callbacks.finish` per transaksi) → `GET /v1/orders/{id}`. Path lama di Worker (`/masuk`, `/langganan`, `/terima-kasih`) redirect ke website. Kredit gratis tetap hanya dari login pertama lewat app di PC. Panggilan bercookie selain GET wajib `Origin` = `PUBLIC_URL` atau `FRONTEND_URL`.
   - **Installer di R2**: sekali `wrangler r2 bucket create badi-downloads`, lalu tiap rilis:
     `wrangler r2 object put badi-downloads/windows/latest --remote --file "../target/release/bundle/nsis/B.A.D.I._<versi>_x64-setup.exe" --content-type application/octet-stream --content-disposition "attachment; filename=\"B.A.D.I._<versi>_x64-setup.exe\""`
   - **Production:** minta Midtrans mengaktifkan fitur simpan kartu (One Click / tokenisasi kartu) untuk merchant, lalu `MIDTRANS_PRODUCTION = "1"` dan server key production.
@@ -49,7 +49,7 @@ wrangler deploy
 ```
 
 **Google OAuth client** (Google Cloud Console → APIs & Services → Credentials → Create OAuth client ID → Web application):
-- Authorized redirect URI: `https://badi-cloud.<akun>.workers.dev/auth/google/callback`
+- Authorized redirect URI: `https://aina.ai.id/api/auth/google/callback` (`FRONTEND_URL` + `/api/auth/google/callback`; login app dan web sama-sama kembali lewat sini)
 - Consent screen: scope `openid` dan `email` saja (tidak butuh verifikasi Google untuk scope ini). Nama aplikasi B.A.D.I., beserta link `/privasi` dan `/ketentuan` dari Worker ini.
 
 **Midtrans sandbox:** Dashboard → Settings → Payment → Notification URL: `https://badi-cloud.<akun>.workers.dev/v1/billing/midtrans`.
@@ -60,7 +60,7 @@ wrangler deploy
 
 ```powershell
 wrangler d1 migrations apply badi-cloud --local
-wrangler dev                                      # http://localhost:8787 (redirect URI lokal: http://localhost:8787/auth/google/callback)
+wrangler dev                                      # http://localhost:8787 (untuk login Google lokal, set `FRONTEND_URL` di `.dev.vars` ke alamat aina-web lokal dan daftarkan `<alamat itu>/api/auth/google/callback`)
 $env:BADI_CLOUD_URL = "http://localhost:8787"; npm run dev
 ```
 
