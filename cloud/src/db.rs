@@ -24,6 +24,7 @@ struct UserRow {
     has_card: f64,
     card_expires: f64,
     renew_failures: f64,
+    suspended: Option<String>,
 }
 
 impl From<UserRow> for Account {
@@ -44,6 +45,7 @@ impl From<UserRow> for Account {
                 card_expires: r.card_expires as i64,
                 failures: r.renew_failures as i64,
             },
+            suspended: r.suspended.filter(|s| !s.is_empty()),
         }
     }
 }
@@ -56,7 +58,7 @@ pub struct Payment {
     pub status: String,
 }
 
-const USER: &str = "id, email, name, plan, plan_until, composio_user, sub_left, topup, free_claimed, auto_renew, card_mask, (card_token IS NOT NULL) AS has_card, card_expires, renew_failures";
+const USER: &str = "id, email, name, plan, plan_until, composio_user, sub_left, topup, free_claimed, auto_renew, card_mask, (card_token IS NOT NULL) AS has_card, card_expires, renew_failures, suspended";
 
 #[derive(Deserialize)]
 struct PlanRow {
@@ -182,7 +184,10 @@ impl Db {
             return Ok((a, false));
         }
         let (plan, topup) = if unlimited { (badi_cloud_core::rules::UNLIMITED, 0) } else if beta { ("beta", beta_credit) } else { ("free", 0) };
-        self.run("INSERT INTO users (email, created_at, plan, plan_until, composio_user, topup, name) VALUES (?1, ?2, ?3, 0, ?4, ?5, ?6)", &[s(email), n(now), s(plan), s(composio_user), n(topup), name.map(s).unwrap_or(JsValue::NULL)]).await?;
+        // An email restricted before (its account deleted since) comes back restricted.
+        let blocked = if unlimited { None } else { self.blocked_reason(email).await? };
+        let blocked = blocked.map(|r| s(&r)).unwrap_or(JsValue::NULL);
+        self.run("INSERT INTO users (email, created_at, plan, plan_until, composio_user, topup, suspended, name) VALUES (?1, ?2, ?3, 0, ?4, ?5, ?6, ?7)", &[s(email), n(now), s(plan), s(composio_user), n(topup), blocked, name.map(s).unwrap_or(JsValue::NULL)]).await?;
         let u = self.first::<UserRow>(&q, &[s(email)]).await?.ok_or("account not created")?;
         Ok((u.into(), true))
     }
@@ -283,7 +288,8 @@ impl Db {
     }
 
     /// Books a call's cost (milli-rupiah) as credits at the rate in force: the subscription's first, then
-    /// the credits that never lapse. Reads the latest balances first.
+    /// the credits that never lapse, past zero as debt (Meter::spend). One UPDATE that subtracts from the
+    /// row as it is, so calls booked at the same time can't overwrite each other's spending.
     pub async fn spend(&self, user: i64, cost: i64, now: i64) -> Result<()> {
         if cost <= 0 {
             return Ok(());
@@ -293,9 +299,18 @@ impl Db {
             return Ok(());
         }
         let c = self.catalog().await?;
-        let mut m = a.meter;
-        m.spend(c.to_credits(cost), a.subscription(&c, now).is_some());
-        self.run("UPDATE users SET sub_left = ?2, topup = ?3 WHERE id = ?1", &[n(user), n(m.sub_left), n(m.topup)]).await
+        let credits = c.to_credits(cost);
+        let unlimited = s(badi_cloud_core::rules::UNLIMITED);
+        if a.subscription(&c, now).is_some() {
+            // SQLite reads every right-hand side from the row before the update.
+            self.run(
+                "UPDATE users SET sub_left = sub_left - MIN(?2, MAX(sub_left, 0)), topup = topup - (?2 - MIN(?2, MAX(sub_left, 0))) WHERE id = ?1 AND plan != ?3",
+                &[n(user), n(credits), unlimited],
+            )
+            .await
+        } else {
+            self.run("UPDATE users SET topup = topup - ?2 WHERE id = ?1 AND plan != ?3", &[n(user), n(credits), unlimited]).await
+        }
     }
 
     /// A task that began within the limits may finish.
@@ -307,9 +322,77 @@ impl Db {
         Ok(self.first::<T>("SELECT until FROM tasks WHERE user_id = ?1 AND task = ?2", &[n(user), s(task)]).await?.is_some_and(|t| t.until as i64 > now))
     }
 
+    /// Lets a task that starts now (with credits) finish until `until`. A task already allowed keeps its
+    /// first deadline: reusing a task id never stretches the grace.
     pub async fn allow_task(&self, user: i64, task: &str, until: i64, now: i64) -> Result<()> {
         self.run("DELETE FROM tasks WHERE until < ?1", &[n(now)]).await?;
-        self.run("INSERT OR REPLACE INTO tasks (user_id, task, until) VALUES (?1, ?2, ?3)", &[n(user), s(task), n(until)]).await
+        self.run("INSERT OR IGNORE INTO tasks (user_id, task, until) VALUES (?1, ?2, ?3)", &[n(user), s(task), n(until)]).await
+    }
+
+    /// Takes one of the account's MAX_INFLIGHT slots for a paid call, in one statement (so parallel calls
+    /// can't all take the last one). False: the account already has that many running.
+    pub async fn begin_call(&self, id: &str, user: i64, now: i64) -> Result<bool> {
+        use badi_cloud_core::rules::{INFLIGHT_MS, MAX_INFLIGHT};
+        self.run("DELETE FROM inflight WHERE user_id = ?1 AND until < ?2", &[n(user), n(now)]).await?;
+        let r = self
+            .0
+            .prepare("INSERT INTO inflight (id, user_id, until) SELECT ?1, ?2, ?3 WHERE (SELECT COUNT(*) FROM inflight WHERE user_id = ?2 AND until >= ?4) < ?5")
+            .bind(&[s(id), n(user), n(now + INFLIGHT_MS), n(now), n(MAX_INFLIGHT)])?
+            .run()
+            .await?;
+        Ok(r.meta()?.and_then(|m| m.changes).unwrap_or(0) > 0)
+    }
+
+    pub async fn end_call(&self, id: &str) -> Result<()> {
+        self.run("DELETE FROM inflight WHERE id = ?1", &[s(id)]).await
+    }
+
+    // ---- restricting accounts ----
+
+    /// Restricts an account (None lifts it). The email is remembered while restricted, so a deleted
+    /// account signs in restricted again.
+    pub async fn set_suspended(&self, user: i64, reason: Option<&str>, now: i64) -> Result<()> {
+        let Some(a) = self.user(user).await? else { return Ok(()) };
+        let hash = badi_cloud_core::sha256(&a.email.to_lowercase());
+        match reason {
+            Some(r) => {
+                self.run("UPDATE users SET suspended = ?2, auto_renew = 0 WHERE id = ?1", &[n(user), s(r)]).await?;
+                self.run("INSERT OR REPLACE INTO blocked_emails (email_hash, reason, at) VALUES (?1, ?2, ?3)", &[s(&hash), s(r), n(now)]).await
+            }
+            None => {
+                self.run("UPDATE users SET suspended = NULL WHERE id = ?1", &[n(user)]).await?;
+                self.run("DELETE FROM blocked_emails WHERE email_hash = ?1", &[s(&hash)]).await
+            }
+        }
+    }
+
+    pub async fn blocked_reason(&self, email: &str) -> Result<Option<String>> {
+        #[derive(Deserialize)]
+        struct B {
+            reason: String,
+        }
+        Ok(self.first::<B>("SELECT reason FROM blocked_emails WHERE email_hash = ?1", &[s(&badi_cloud_core::sha256(&email.to_lowercase()))]).await?.map(|b| b.reason))
+    }
+
+    /// A paid order Midtrans reversed (refund, chargeback): marks it so once. Returns (user, item) the
+    /// first time, None if it was never delivered or was reversed already.
+    pub async fn mark_reversed(&self, order: &str, status: &str) -> Result<Option<(i64, String)>> {
+        #[derive(Deserialize)]
+        struct P {
+            user_id: f64,
+            item: String,
+        }
+        let Some(p) = self.first::<P>("SELECT user_id, item FROM payments WHERE order_id = ?1 AND status = 'paid'", &[s(order)]).await? else { return Ok(None) };
+        let r = self.0.prepare("UPDATE payments SET status = ?2 WHERE order_id = ?1 AND status = 'paid'").bind(&[s(order), s(status)])?.run().await?;
+        if r.meta()?.and_then(|m| m.changes).unwrap_or(0) == 0 {
+            return Ok(None);
+        }
+        Ok(Some((p.user_id as i64, p.item)))
+    }
+
+    /// Sets the balances a reversed payment leaves (rules::claw_back).
+    pub async fn set_balances(&self, user: i64, sub_left: i64, topup: i64, plan_until: i64) -> Result<()> {
+        self.run("UPDATE users SET sub_left = ?2, topup = ?3, plan_until = ?4 WHERE id = ?1", &[n(user), n(sub_left), n(topup), n(plan_until)]).await
     }
 
     /// A new order: `kind` is 'checkout' (paid by the person) or 'renewal' (the saved card).
@@ -491,7 +574,7 @@ impl Db {
 
     /// The right to erasure (UU PDP). Payments stay for the tax records, without the account.
     pub async fn delete_user(&self, user: i64) -> Result<()> {
-        for sql in ["DELETE FROM tokens WHERE user_id = ?1", "DELETE FROM composio_sessions WHERE user_id = ?1", "DELETE FROM tasks WHERE user_id = ?1", "DELETE FROM login_grants WHERE user_id = ?1", "DELETE FROM users WHERE id = ?1"] {
+        for sql in ["DELETE FROM tokens WHERE user_id = ?1", "DELETE FROM composio_sessions WHERE user_id = ?1", "DELETE FROM tasks WHERE user_id = ?1", "DELETE FROM inflight WHERE user_id = ?1", "DELETE FROM login_grants WHERE user_id = ?1", "DELETE FROM users WHERE id = ?1"] {
             self.run(sql, &[n(user)]).await?;
         }
         Ok(())

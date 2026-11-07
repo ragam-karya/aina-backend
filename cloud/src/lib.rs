@@ -309,6 +309,23 @@ async fn admin(mut req: Request, env: &Env, db: &Db, path: &str) -> Result<Respo
             let a = db.user(a.id).await?.ok_or("account gone")?;
             json_res(200, &json!({ "email": email, "account": a.view(&db.catalog().await?, t) }))
         }
+        // Restricts an account: { "email": "…", "reason": "abuse" }. Every paid call is refused, and the
+        // email stays restricted even if the account is deleted and signed in again.
+        (Method::Post, "suspend") => {
+            let b: Value = req.json().await.unwrap_or(Value::Null);
+            let Some(email) = b["email"].as_str().and_then(core::clean_email) else { return error(400, "invalid_request_error", "email is needed.") };
+            let reason: String = b["reason"].as_str().unwrap_or("admin").trim().chars().take(200).collect();
+            let Some(a) = db.user_by_email(&email).await? else { return error(404, "not_found", "No account with that email.") };
+            db.set_suspended(a.id, Some(if reason.is_empty() { "admin" } else { &reason }), t).await?;
+            json_res(200, &json!({ "email": email, "suspended": true }))
+        }
+        // ?email=…: lifts the restriction.
+        (Method::Delete, "suspend") => {
+            let Some(email) = query("email").as_deref().and_then(core::clean_email) else { return error(400, "invalid_request_error", "?email= is needed.") };
+            let Some(a) = db.user_by_email(&email).await? else { return error(404, "not_found", "No account with that email.") };
+            db.set_suspended(a.id, None, t).await?;
+            json_res(200, &json!({ "email": email, "suspended": false }))
+        }
         // The price list, internal notes included, and what a credit is worth.
         (Method::Get, "plans") => {
             let c = db.catalog().await?;
@@ -599,7 +616,29 @@ async fn settle(db: &Db, n: &Value) -> Result<()> {
             }
         }
         Paid::Pending => {}
-        Paid::Failed(status) => db.set_payment_status(order, &status).await?,
+        Paid::Failed(status) => {
+            // A payment already delivered and then refunded or charged back: its credits come back off
+            // the account (into debt if spent), and a chargeback restricts it.
+            if let Some(chargeback) = rules::reversal(&status)
+                && let Some((user, item)) = db.mark_reversed(order, &status).await?
+            {
+                let t = now();
+                if let (Some(p), Some(a)) = (db.catalog().await?.get(&item).cloned(), db.user(user).await?) {
+                    let (sub, top, until) = rules::claw_back(&a, &p, t);
+                    db.set_balances(user, sub, top, until).await?;
+                    if p.kind == Kind::Subscription {
+                        db.set_auto_renew(user, false).await?;
+                    }
+                }
+                if chargeback {
+                    db.drop_card(user).await?;
+                    db.set_suspended(user, Some(&format!("chargeback {order}")), t).await?;
+                }
+                console_log!("[billing] {order}: {status} after delivery; credits taken back{}", if chargeback { ", account restricted" } else { "" });
+                return Ok(());
+            }
+            db.set_payment_status(order, &status).await?
+        }
     }
     Ok(())
 }
@@ -680,21 +719,41 @@ async fn scheduled(_event: ScheduledEvent, env: Env, _ctx: ScheduleContext) {
 
 // ---------- the proxy ----------
 
-/// Checks that a call has credits to start on; remembers its task so it may finish past zero.
-async fn gate(req: &Request, db: &Db, a: &Account) -> Result<std::result::Result<(), Refusal>> {
+/// Checks that a call may start (not restricted, credits to start on, or a running task still inside
+/// the overdraft); remembers a task started with credits so it may finish a little past zero (its
+/// deadline is never stretched); and, with `slot`, takes one of the account's running-call slots. Ok:
+/// the slot's id, for Db::end_call when the call is booked ("" without one).
+async fn gate(req: &Request, db: &Db, a: &Account, slot: bool) -> Result<std::result::Result<String, Refusal>> {
     let t = now();
-    let task = header(req, "x-badi-task");
+    let task = header(req, "x-badi-task").filter(|id| rules::valid_task(id));
     let continuing = match &task {
         Some(id) => db.task_continues(a.id, id, t).await?,
         None => false,
     };
-    if let Err(r) = admit(a, &db.catalog().await?, continuing, t) {
+    let catalog = db.catalog().await?;
+    if let Err(r) = admit(a, &catalog, continuing, t) {
         return Ok(Err(r));
     }
-    if let Some(id) = task {
+    let mut call = String::new();
+    if slot && !a.unlimited() {
+        call = core::random_hex(12);
+        if !db.begin_call(&call, a.id, t).await? {
+            return Ok(Err(rules::refusal(429, "rate_limit_error", "Terlalu banyak permintaan aina berjalan bersamaan. Tunggu sebentar lalu coba lagi.")));
+        }
+    }
+    if let Some(id) = task
+        && a.left(&catalog, t) > 0
+    {
         db.allow_task(a.id, &id, t + TASK_GRACE_MS, t).await?;
     }
-    Ok(Ok(()))
+    Ok(Ok(call))
+}
+
+/// Frees a call's slot (best effort: a slot left behind frees itself after INFLIGHT_MS).
+async fn end_call(db: &Db, call: &str) {
+    if !call.is_empty() {
+        let _ = db.end_call(call).await;
+    }
 }
 
 async fn messages(mut req: Request, env: Env, ctx: &Context, db: &Db, a: Account, count_only: bool) -> Result<Response> {
@@ -713,27 +772,37 @@ async fn messages(mut req: Request, env: Env, ctx: &Context, db: &Db, a: Account
         let res = upstream(Method::Post, "https://api.anthropic.com/v1/messages/count_tokens", &headers, Some(body)).await?;
         return pass(res, "application/json");
     }
-    if let Err(r) = gate(&req, db, &a).await? {
-        return refuse(r);
-    }
     if let Err(r) = rules::check_model(&model) {
         return refuse(r);
     }
-    let mut res = upstream(Method::Post, "https://api.anthropic.com/v1/messages", &headers, Some(body)).await?;
+    let call = match gate(&req, db, &a, true).await? {
+        Ok(c) => c,
+        Err(r) => return refuse(r),
+    };
+    let mut res = match upstream(Method::Post, "https://api.anthropic.com/v1/messages", &headers, Some(body)).await {
+        Ok(r) => r,
+        Err(e) => {
+            end_call(db, &call).await;
+            return Err(e);
+        }
+    };
     if res.status_code() >= 300 {
+        end_call(db, &call).await;
         return pass(res, "application/json");
     }
     let user = a.id;
     if parsed["stream"] != true {
-        let bytes = res.bytes().await?;
+        let bytes = res.bytes().await;
         let mut meter = UsageMeter::default();
-        if let Ok(v) = serde_json::from_slice::<Value>(&bytes) {
+        if let Ok(Ok(v)) = bytes.as_deref().map(serde_json::from_slice::<Value>) {
             meter.take(&v["usage"]);
         }
-        db.spend(user, meter.cost(&model), now()).await?;
+        let spent = db.spend(user, meter.cost(&model), now()).await;
+        end_call(db, &call).await;
+        spent?;
         let h = Headers::new();
         h.set("content-type", "application/json")?;
-        return Ok(Response::from_bytes(bytes)?.with_headers(h));
+        return Ok(Response::from_bytes(bytes?)?.with_headers(h));
     }
     // Streamed: bill from the usage the stream carried, when it ends or the app hangs up.
     let (tx, rx) = futures_channel::oneshot::channel();
@@ -745,10 +814,12 @@ async fn messages(mut req: Request, env: Env, ctx: &Context, db: &Db, a: Account
         chunk
     });
     ctx.wait_until(async move {
-        if let Ok(m) = rx.await
-            && let Ok(d1) = env.d1("DB")
-        {
-            let _ = Db(d1).spend(user, m.cost(&model), now()).await;
+        if let Ok(d1) = env.d1("DB") {
+            let db = Db(d1);
+            if let Ok(m) = rx.await {
+                let _ = db.spend(user, m.cost(&model), now()).await;
+            }
+            end_call(&db, &call).await;
         }
     });
     let h = Headers::new();
@@ -757,59 +828,74 @@ async fn messages(mut req: Request, env: Env, ctx: &Context, db: &Db, a: Account
     Ok(Response::from_stream(stream)?.with_headers(h))
 }
 
+/// A priced upstream call with a slot: booked at `cost` when the upstream takes it, then the slot freed.
+async fn paid_call(db: &Db, a: &Account, call: &str, cost: i64, res: Result<Response>, stream_type: &str) -> Result<Response> {
+    let res = match res {
+        Ok(r) => r,
+        Err(e) => {
+            end_call(db, call).await;
+            return Err(e);
+        }
+    };
+    let spent = if res.status_code() < 300 { db.spend(a.id, cost, now()).await } else { Ok(()) };
+    end_call(db, call).await;
+    spent?;
+    pass(res, stream_type)
+}
+
 async fn transcribe(mut req: Request, env: &Env, db: &Db, a: Account) -> Result<Response> {
-    if let Err(r) = gate(&req, db, &a).await? {
-        return refuse(r);
-    }
+    let call = match gate(&req, db, &a, true).await? {
+        Ok(c) => c,
+        Err(r) => return refuse(r),
+    };
     let ctype = header(&req, "content-type").unwrap_or_default();
-    let body = req.bytes().await?;
+    let body = match req.bytes().await {
+        Ok(b) => b,
+        Err(e) => {
+            end_call(db, &call).await;
+            return Err(e);
+        }
+    };
     let cost = stt_cost(body.len());
-    let res = upstream(Method::Post, "https://api.openai.com/v1/audio/transcriptions", &[("authorization", format!("Bearer {}", secret(env, "OPENAI_API_KEY"))), ("content-type", ctype)], Some(body)).await?;
-    if res.status_code() < 300 {
-        db.spend(a.id, cost, now()).await?;
-    }
-    pass(res, "application/json")
+    let res = upstream(Method::Post, "https://api.openai.com/v1/audio/transcriptions", &[("authorization", format!("Bearer {}", secret(env, "OPENAI_API_KEY"))), ("content-type", ctype)], Some(body)).await;
+    paid_call(db, &a, &call, cost, res, "application/json").await
 }
 
 async fn speech(mut req: Request, env: &Env, db: &Db, a: Account) -> Result<Response> {
-    if let Err(r) = gate(&req, db, &a).await? {
-        return refuse(r);
-    }
     let body = req.bytes().await?;
     let v: Value = serde_json::from_slice(&body).unwrap_or(Value::Null);
     if let Err(r) = rules::check_tts_model(v["model"].as_str().unwrap_or("")) {
         return refuse(r);
     }
+    let call = match gate(&req, db, &a, true).await? {
+        Ok(c) => c,
+        Err(r) => return refuse(r),
+    };
     let cost = tts_cost(v["input"].as_str().unwrap_or("").chars().count(), false);
-    let res = upstream(Method::Post, "https://api.openai.com/v1/audio/speech", &[("authorization", format!("Bearer {}", secret(env, "OPENAI_API_KEY"))), ("content-type", "application/json".into())], Some(body)).await?;
-    if res.status_code() < 300 {
-        db.spend(a.id, cost, now()).await?;
-    }
-    pass(res, "application/octet-stream")
+    let res = upstream(Method::Post, "https://api.openai.com/v1/audio/speech", &[("authorization", format!("Bearer {}", secret(env, "OPENAI_API_KEY"))), ("content-type", "application/json".into())], Some(body)).await;
+    paid_call(db, &a, &call, cost, res, "application/octet-stream").await
 }
 
 async fn eleven(mut req: Request, env: &Env, db: &Db, a: Account, voice: &str) -> Result<Response> {
-    if let Err(r) = gate(&req, db, &a).await? {
-        return refuse(r);
-    }
     let query = req.url()?.query().map(|q| format!("?{q}")).unwrap_or_default();
     let body = req.bytes().await?;
+    let call = match gate(&req, db, &a, true).await? {
+        Ok(c) => c,
+        Err(r) => return refuse(r),
+    };
     let v: Value = serde_json::from_slice(&body).unwrap_or(Value::Null);
     let cost = tts_cost(v["text"].as_str().unwrap_or("").chars().count(), true);
     let voice: String = voice.chars().filter(char::is_ascii_alphanumeric).collect();
     let url = format!("https://api.elevenlabs.io/v1/text-to-speech/{voice}/stream{query}");
-    let res = upstream(Method::Post, &url, &[("xi-api-key", secret(env, "ELEVENLABS_API_KEY")), ("content-type", "application/json".into())], Some(body)).await?;
-    if res.status_code() < 300 {
-        db.spend(a.id, cost, now()).await?;
-    }
-    pass(res, "application/octet-stream")
+    let res = upstream(Method::Post, &url, &[("xi-api-key", secret(env, "ELEVENLABS_API_KEY")), ("content-type", "application/json".into())], Some(body)).await;
+    paid_call(db, &a, &call, cost, res, "application/octet-stream").await
 }
 
 // Realtime voice: the app's WebRTC audio goes straight to OpenAI, so the cloud mints the one-minute
 // client secret that opens the session (the account must have room left) and bills each reply from the
 // usage the app reports from its response.done events.
 async fn realtime_secret(mut req: Request, env: &Env, db: &Db, a: Account) -> Result<Response> {
-    if let Err(r) = gate(&req, db, &a).await? {
+    if let Err(r) = gate(&req, db, &a, false).await? {
         return refuse(r);
     }
     let body: Value = req.json().await.unwrap_or(Value::Null);
@@ -873,7 +959,8 @@ async fn composio(mut req: Request, env: &Env, db: &Db, a: Account, path: &str) 
     if let Err(r) = rules::admit_apps(&a, &db.catalog().await?, paid, now()) {
         return refuse(r);
     }
-    if let Err(r) = gate(&req, db, &a).await? {
+    // Composio calls aren't billed, so they take no slot.
+    if let Err(r) = gate(&req, db, &a, false).await? {
         return refuse(r);
     }
     let method = req.method();
@@ -905,7 +992,16 @@ async fn composio(mut req: Request, env: &Env, db: &Db, a: Account, path: &str) 
             if method == Method::Get { (200, acc) } else { composio_call(env, method, path, "", None).await? }
         }
         ComposioRoute::Pass => composio_call(env, method, path, &query, (!body.is_null()).then_some(&body)).await?,
-        ComposioRoute::Execute(b) => composio_call(env, Method::Post, path, &query, Some(&b)).await?,
+        ComposioRoute::Execute(b) => {
+            // A run on a named linked account: only on the account's own (Composio would take another's).
+            if let Some(id) = b["connected_account_id"].as_str() {
+                let (_, acc) = composio_call(env, Method::Get, &format!("connected_accounts/{id}"), "", None).await?;
+                if acc["user_id"].as_str() != Some(a.composio_user.as_str()) {
+                    return refuse(rules::not_found());
+                }
+            }
+            composio_call(env, Method::Post, path, &query, Some(&b)).await?
+        }
         ComposioRoute::Deny => return refuse(rules::not_found()),
     };
     json_res(status, &v)
@@ -945,6 +1041,14 @@ async fn fetch(req: Request, env: Env, ctx: Context) -> Result<Response> {
     }
     // Everything else needs an account.
     let Some((a, hash)) = user_of(&req, &env, &db).await? else { return refuse(rules::unauthorized()) };
+    // A restricted account sees itself, stops renewing, signs out or deletes itself; nothing else.
+    let allowed_restricted = matches!(
+        (&method, path.as_str()),
+        (Method::Get, "/v1/account") | (Method::Delete, "/v1/account") | (Method::Post, "/v1/auth/logout") | (Method::Post, "/v1/subscription/cancel") | (Method::Delete, "/v1/subscription/card")
+    );
+    if a.suspended.is_some() && !allowed_restricted {
+        return refuse(rules::suspended());
+    }
     match (method, path.as_str()) {
         (Method::Get, "/v1/account") => {
             // The app asks every minute (and every 15 s after a checkout): a payment whose notification
