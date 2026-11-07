@@ -12,6 +12,7 @@ use worker::{D1Database, Result};
 struct UserRow {
     id: f64,
     email: String,
+    name: Option<String>,
     plan: String,
     plan_until: f64,
     composio_user: String,
@@ -30,6 +31,7 @@ impl From<UserRow> for Account {
         Account {
             id: r.id as i64,
             email: r.email,
+            name: r.name,
             plan: r.plan,
             plan_until: r.plan_until as i64,
             composio_user: r.composio_user,
@@ -46,7 +48,15 @@ impl From<UserRow> for Account {
     }
 }
 
-const USER: &str = "id, email, plan, plan_until, composio_user, sub_left, topup, free_claimed, auto_renew, card_mask, (card_token IS NOT NULL) AS has_card, card_expires, renew_failures";
+/// An order: whose it is, what for, how much, and pending, paid or how it failed.
+pub struct Payment {
+    pub user: i64,
+    pub item: String,
+    pub amount: i64,
+    pub status: String,
+}
+
+const USER: &str = "id, email, name, plan, plan_until, composio_user, sub_left, topup, free_claimed, auto_renew, card_mask, (card_token IS NOT NULL) AS has_card, card_expires, renew_failures";
 
 #[derive(Deserialize)]
 struct PlanRow {
@@ -149,12 +159,17 @@ impl Db {
 
     /// The account for an email; a new one starts on Free (its starter credits come with the first
     /// sign-in from a PC that hasn't had them), or, invited to the closed beta, on the beta credit (an
-    /// invited account still on Free moves to the beta once). Returns (account, new).
-    pub async fn find_or_create(&self, email: &str, now: i64, composio_user: &str, beta: bool, unlimited: bool) -> Result<(Account, bool)> {
+    /// invited account still on Free moves to the beta once). The name Google gives is kept up to date.
+    /// Returns (account, new).
+    pub async fn find_or_create(&self, email: &str, name: Option<&str>, now: i64, composio_user: &str, beta: bool, unlimited: bool) -> Result<(Account, bool)> {
         let q = format!("SELECT {USER} FROM users WHERE email = ?1");
         let beta_credit = if beta { self.catalog().await?.of_kind(Kind::Beta).map(|p| p.credits * MILLI).unwrap_or(0) } else { 0 };
         if let Some(u) = self.first::<UserRow>(&q, &[s(email)]).await? {
-            let a: Account = u.into();
+            let mut a: Account = u.into();
+            if let Some(name) = name.filter(|nm| a.name.as_deref() != Some(*nm)) {
+                self.run("UPDATE users SET name = ?2 WHERE id = ?1", &[n(a.id), s(name)]).await?;
+                a.name = Some(name.to_string());
+            }
             // On the UNLIMITED_EMAILS list: the owner's plan, whatever the account had before.
             if unlimited && !a.unlimited() {
                 self.run("UPDATE users SET plan = ?2, plan_until = 0 WHERE id = ?1", &[n(a.id), s(badi_cloud_core::rules::UNLIMITED)]).await?;
@@ -167,7 +182,7 @@ impl Db {
             return Ok((a, false));
         }
         let (plan, topup) = if unlimited { (badi_cloud_core::rules::UNLIMITED, 0) } else if beta { ("beta", beta_credit) } else { ("free", 0) };
-        self.run("INSERT INTO users (email, created_at, plan, plan_until, composio_user, topup) VALUES (?1, ?2, ?3, 0, ?4, ?5)", &[s(email), n(now), s(plan), s(composio_user), n(topup)]).await?;
+        self.run("INSERT INTO users (email, created_at, plan, plan_until, composio_user, topup, name) VALUES (?1, ?2, ?3, 0, ?4, ?5, ?6)", &[s(email), n(now), s(plan), s(composio_user), n(topup), name.map(s).unwrap_or(JsValue::NULL)]).await?;
         let u = self.first::<UserRow>(&q, &[s(email)]).await?.ok_or("account not created")?;
         Ok((u.into(), true))
     }
@@ -233,14 +248,19 @@ impl Db {
         Ok(row.filter(|o| o.expires as i64 > now).map(|o| (o.app_state, o.next)))
     }
 
-    /// Whose order this is (to show it only to them).
-    pub async fn payment_owner(&self, order: &str) -> Result<Option<(i64, String)>> {
+    /// An order as the website shows it to the person whose order it is.
+    pub async fn payment(&self, order: &str) -> Result<Option<Payment>> {
         #[derive(Deserialize)]
         struct P {
             user_id: f64,
+            item: String,
+            amount: f64,
             status: String,
         }
-        Ok(self.first::<P>("SELECT user_id, status FROM payments WHERE order_id = ?1", &[s(order)]).await?.map(|p| (p.user_id as i64, p.status)))
+        Ok(self
+            .first::<P>("SELECT user_id, item, amount, status FROM payments WHERE order_id = ?1", &[s(order)])
+            .await?
+            .map(|p| Payment { user: p.user_id as i64, item: p.item, amount: p.amount as i64, status: p.status }))
     }
 
     /// A one-use code that hands a login back to the app that asked for it.

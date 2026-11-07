@@ -49,7 +49,8 @@ fn header(req: &Request, k: &str) -> Option<String> {
 }
 
 /// The account behind a call: its token in x-api-key, xi-api-key or Authorization: Bearer (the app), or
-/// the session cookie (the browser; a POST with it must come from this site's own pages).
+/// the session cookie (the browser; a POST with it must come from our own pages: the website's, through
+/// its /api proxy, or this Worker's).
 async fn user_of(req: &Request, env: &Env, db: &Db) -> Result<Option<(Account, String)>> {
     let header_token = header(req, "x-api-key")
         .or_else(|| header(req, "xi-api-key"))
@@ -58,7 +59,7 @@ async fn user_of(req: &Request, env: &Env, db: &Db) -> Result<Option<(Account, S
         Some(t) => Some(t),
         None => {
             let t = core::cookie(header(req, "cookie").as_deref(), core::SESSION_COOKIE);
-            if t.is_some() && req.method() != Method::Get && !core::same_origin(header(req, "origin").as_deref(), &secret(env, "PUBLIC_URL")) {
+            if t.is_some() && req.method() != Method::Get && !core::same_origin(header(req, "origin").as_deref(), &[&secret(env, "PUBLIC_URL"), &frontend_url(env)]) {
                 return Ok(None);
             }
             t
@@ -112,67 +113,120 @@ fn callback_url(env: &Env) -> String {
     format!("{}/auth/google/callback", secret(env, "PUBLIC_URL").trim_end_matches('/'))
 }
 
+/// The website with the sign-in, plans and thanks pages (FRONTEND_URL in wrangler.toml).
+fn frontend_url(env: &Env) -> String {
+    secret(env, "FRONTEND_URL").trim_end_matches('/').to_string()
+}
+
 fn page(html: String, status: u16) -> Result<Response> {
     Ok(Response::from_html(html)?.with_status(status))
 }
 
-/// GET /login?app_state=… (the app) or /login?next=/langganan (the browser): off to Google.
+/// A web login that didn't work: back to the website's sign-in page, which says why.
+fn web_problem(env: &Env, message: &str, next: Option<&str>) -> Result<Response> {
+    let next = next.map(|n| format!("&next={}", core::web::query_value(n))).unwrap_or_default();
+    redirect_to(&format!("{}/masuk?error={}{next}", frontend_url(env), core::web::query_value(message)))
+}
+
+/// GET /login?app_state=… (the app) or /login?next=/langganan (the browser, through the website's
+/// /api proxy, so the login nonce lands on the website's domain): off to Google.
 async fn login(req: &Request, env: &Env, db: &Db) -> Result<Response> {
     let url = req.url()?;
     let q = |k: &str| url.query_pairs().find(|(name, _)| name == k).map(|(_, v)| v.to_string()).unwrap_or_default();
     let app_state = q("app_state");
-    // A web login: back to a page of this site (any other target falls back to the plans).
+    // A web login: back to a page of the website (any other target falls back to the plans).
     let next = (app_state.is_empty()).then(|| core::safe_next(&q("next")).unwrap_or_else(|| "/langganan".into()));
     if next.is_none() && !core::valid_app_state(&app_state) {
         return page(core::login_problem_page("Permintaan masuk tidak lengkap."), 400);
     }
     let client = secret(env, "GOOGLE_CLIENT_ID");
     if client.is_empty() {
-        return page(core::login_problem_page("Login Google belum disiapkan di server."), 503);
+        return match &next {
+            Some(n) => web_problem(env, "Login Google belum disiapkan di server.", Some(n)),
+            None => page(core::login_problem_page("Login Google belum disiapkan di server."), 503),
+        };
     }
     let state = core::random_hex(24);
     let t = now();
-    db.put_oauth_state(&state, &app_state, next.as_deref(), t + core::OAUTH_STATE_TTL_MS, t).await?;
-    Response::redirect(Url::parse(&core::google_auth_url(&client, &callback_url(env), &state))?)
+    let nonce = next.is_some().then(|| core::random_hex(16));
+    let kept = match &nonce {
+        Some(n) => core::web_login_state(n),
+        None => app_state,
+    };
+    db.put_oauth_state(&state, &kept, next.as_deref(), t + core::OAUTH_STATE_TTL_MS, t).await?;
+    let mut res = Response::redirect(Url::parse(&core::google_auth_url(&client, &callback_url(env), &state))?)?;
+    if let Some(n) = nonce {
+        res.headers_mut().set("set-cookie", &core::login_cookie(&n))?;
+    }
+    Ok(res)
 }
 
-/// GET /auth/google/callback?code=…&state=…: the account, then back to the app with a one-use code.
+/// GET /auth/google/callback?code=…&state=…: the account, then back to the app with a one-use code, or
+/// (a web login) on to the website's /api/auth/finish with one.
 async fn google_callback(req: &Request, env: &Env, db: &Db) -> Result<Response> {
     let url = req.url()?;
     let q = |k: &str| url.query_pairs().find(|(name, _)| name == k).map(|(_, v)| v.to_string()).unwrap_or_default();
-    if !q("error").is_empty() {
-        return page(core::login_problem_page("Login Google dibatalkan."), 400);
-    }
     let t = now();
-    let Some((app_state, next)) = db.take_oauth_state(&q("state"), t).await? else { return page(core::login_problem_page("Waktu login sudah habis."), 400) };
+    // Unknown (expired or used): said on the website, as nothing tells a web login from the app's.
+    let Some((kept, next)) = db.take_oauth_state(&q("state"), t).await? else {
+        return web_problem(env, "Waktu login sudah habis. Coba masuk lagi.", None);
+    };
+    let web = next.as_deref().and_then(core::safe_next);
+    let problem = |message: &str, status: u16| match &web {
+        Some(n) => web_problem(env, message, Some(n)),
+        None => page(core::login_problem_page(message), status),
+    };
+    if !q("error").is_empty() {
+        return problem("Login Google dibatalkan.", 400);
+    }
     let client = secret(env, "GOOGLE_CLIENT_ID");
     let form = core::google_token_form(&client, &secret(env, "GOOGLE_CLIENT_SECRET"), &callback_url(env), &q("code"));
     let mut res = upstream(Method::Post, core::GOOGLE_TOKEN, &[("content-type", "application/x-www-form-urlencoded".into())], Some(form.into_bytes())).await?;
     let tokens: Value = res.json().await.unwrap_or(Value::Null);
-    let Some(email) = tokens["id_token"].as_str().and_then(|id| core::google_email(id, &client)) else {
-        return page(core::login_problem_page("Google tidak memberi email yang terverifikasi."), 400);
+    let Some((email, name)) = tokens["id_token"].as_str().and_then(|id| core::google_profile(id, &client)) else {
+        return problem("Google tidak memberi email yang terverifikasi.", 400);
     };
     // The closed beta (BETA = "1"): only invited emails get in, and they get the beta credit.
     let beta = secret(env, "BETA") == "1";
     // UNLIMITED_EMAILS (comma-separated): accounts that use Badi without limits, e.g. the owner's.
     let unlimited = secret(env, "UNLIMITED_EMAILS").split(',').any(|e| e.trim().eq_ignore_ascii_case(&email));
     if beta && !unlimited && !db.invited(&email.to_lowercase()).await? {
-        return page(core::login_problem_page(&format!("aina masih beta tertutup, dan {email} belum ada di daftar undangan. Minta undangan ke tim aina, lalu masuk lagi.")), 403);
+        return problem(&format!("aina masih beta tertutup, dan {email} belum ada di daftar undangan. Minta undangan ke tim aina, lalu masuk lagi."), 403);
     }
     // Composio links belong to this id; it says nothing about the person.
-    let (account, _) = db.find_or_create(&email, t, &format!("badi_{}", core::random_hex(12)), beta, unlimited).await?;
-    // The browser: a session cookie (a device token labelled "web"), then back to its page. The free
-    // starter is not given here; it comes with the first sign-in from the app on a PC.
-    if let Some(next) = next.and_then(|n| core::safe_next(&n)) {
-        let token = core::new_token();
-        db.add_token(&core::sha256(&token), account.id, "web", t).await?;
-        let mut res = redirect_to(&next)?;
-        res.headers_mut().set("set-cookie", &core::session_cookie(&token))?;
-        return Ok(res);
-    }
+    let (account, _) = db.find_or_create(&email, name.as_deref(), t, &format!("badi_{}", core::random_hex(12)), beta, unlimited).await?;
     let code = core::random_hex(24);
-    db.put_grant(&core::sha256(&code), account.id, &app_state, t + core::GRANT_TTL_MS, t).await?;
-    page(core::back_to_app_page(&code, &app_state), 200)
+    db.put_grant(&core::sha256(&code), account.id, &kept, t + core::GRANT_TTL_MS, t).await?;
+    // The browser: on to the website, which trades the code for its session cookie. The free starter
+    // is not given there; it comes with the first sign-in from the app on a PC.
+    if let Some(next) = web {
+        return redirect_to(&format!("{}/api/auth/finish?code={code}&next={}", frontend_url(env), core::web::query_value(&next)));
+    }
+    page(core::back_to_app_page(&code, &kept), 200)
+}
+
+/// GET /auth/finish?code=…&next=… (opened as FRONTEND_URL/api/auth/finish): a web login's one-use code,
+/// from the browser that started it (its nonce in LOGIN_COOKIE), for the session cookie (a device token
+/// labelled "web") on the website's domain, then on to `next`.
+async fn auth_finish(req: &Request, env: &Env, db: &Db) -> Result<Response> {
+    let url = req.url()?;
+    let q = |k: &str| url.query_pairs().find(|(name, _)| name == k).map(|(_, v)| v.to_string()).unwrap_or_default();
+    let next = core::safe_next(&q("next")).unwrap_or_else(|| "/langganan".into());
+    let t = now();
+    let nonce = core::cookie(header(req, "cookie").as_deref(), core::LOGIN_COOKIE).unwrap_or_default();
+    let user = if nonce.is_empty() { None } else { db.take_grant(&core::sha256(&q("code")), &core::web_login_state(&nonce), t).await? };
+    let mut res = match user {
+        Some(user) => {
+            let token = core::new_token();
+            db.add_token(&core::sha256(&token), user, "web", t).await?;
+            let mut res = redirect_to(&next)?;
+            res.headers_mut().set("set-cookie", &core::session_cookie(&token))?;
+            res
+        }
+        None => web_problem(env, "Link masuk ini sudah dipakai atau kedaluwarsa. Coba masuk lagi.", Some(&next))?,
+    };
+    res.headers_mut().append("set-cookie", &core::clear_login_cookie())?;
+    Ok(res)
 }
 
 /// POST /v1/auth/exchange { code, app_state, device, hwid }: the app trades the one-use code for its
@@ -407,7 +461,7 @@ async fn start_checkout(env: &Env, db: &Db, a: &Account, item: &str) -> Result<s
     }
     let order = format!("badi-{}-{t}-{}", a.id, core::random_hex(3));
     db.add_payment(&order, a.id, &p.id, p.price, "checkout", t).await?;
-    let finish = format!("{}/terima-kasih", secret(env, "PUBLIC_URL").trim_end_matches('/'));
+    let finish = format!("{}/terima-kasih", frontend_url(env));
     let body = core::snap_order(&order, p, &a.email, &finish, &format!("badi-{}", a.id));
     let mut res = upstream(Method::Post, core::snap_url(midtrans_production(env)), &midtrans_headers(&key), Some(body.to_string().into_bytes())).await?;
     let v: Value = res.json().await.unwrap_or(Value::Null);
@@ -418,6 +472,8 @@ async fn start_checkout(env: &Env, db: &Db, a: &Account, item: &str) -> Result<s
 }
 
 // ---------- subscribing from the browser ----------
+// The pages are on the website (FRONTEND_URL), which calls this Worker through its /api proxy with the
+// session cookie; here are only the account, the plans, checkout and the order, all JSON.
 
 fn redirect_to(location: &str) -> Result<Response> {
     let mut res = Response::empty()?.with_status(303);
@@ -425,7 +481,15 @@ fn redirect_to(location: &str) -> Result<Response> {
     Ok(res)
 }
 
-/// The account page's view of an account, plus its cycle's end in words.
+/// The pages that moved to the website: there, with the same path and query (/terima-kasih: an order
+/// whose payment page was opened before the move still comes back here).
+fn to_frontend(req: &Request, env: &Env) -> Result<Response> {
+    let url = req.url()?;
+    let query = url.query().map(|q| format!("?{q}")).unwrap_or_default();
+    redirect_to(&format!("{}{}{query}", frontend_url(env), url.path()))
+}
+
+/// An account as /v1/account shows it, plus its cycle's end in words.
 fn web_view(a: &Account, c: &badi_cloud_core::plans::Catalog) -> Value {
     let mut v = a.view(c, now());
     if v["subscribed"] == true {
@@ -434,64 +498,37 @@ fn web_view(a: &Account, c: &badi_cloud_core::plans::Catalog) -> Value {
     v
 }
 
-/// GET /langganan: the plans, for the signed-in browser (otherwise off to sign in first).
-async fn web_plans(req: &Request, env: &Env, db: &Db, a: Option<Account>) -> Result<Response> {
-    let Some(a) = a else { return redirect_to("/masuk?next=/langganan") };
-    let url = req.url()?;
-    let notice = url.query_pairs().find(|(k, _)| k == "error").map(|(_, v)| v.to_string());
-    // A payment whose notification was lost shows as paid here too.
-    if !db.pending_payments(Some(a.id), now() - RECONCILE_WINDOW_MS).await?.is_empty() {
+/// GET /v1/orders/{id}: the person's own order as the thanks page shows it, settled now when Midtrans
+/// has it paid but its notification is late, with the account after it. Someone else's is not found.
+async fn order(env: &Env, db: &Db, a: &Account, id: &str) -> Result<Response> {
+    let Some(p) = db.payment(id).await?.filter(|p| p.user == a.id) else { return refuse(rules::not_found()) };
+    let p = if p.status == "pending" {
         reconcile(env, db, Some(a.id)).await?;
-    }
-    let a = db.user(a.id).await?.unwrap_or(a);
+        db.payment(id).await?.unwrap_or(p)
+    } else {
+        p
+    };
     let c = db.catalog().await?;
-    page(core::web::plans_page(&web_view(&a, &c), &c.public(), notice.as_deref().map(|n| (n, true))), 200)
-}
-
-/// POST /web/checkout (form: item): to Midtrans, or back to the plans with why not.
-async fn web_checkout(mut req: Request, env: &Env, db: &Db, a: Option<Account>) -> Result<Response> {
-    let Some(a) = a else { return redirect_to("/masuk?next=/langganan") };
-    let form = req.form_data().await?;
-    let item = match form.get("item") {
-        Some(FormEntry::Field(v)) => v,
-        _ => String::new(),
+    let a = db.user(a.id).await?.unwrap_or_else(|| a.clone());
+    let plan = c.get(&p.item);
+    let status = match p.status.as_str() {
+        "paid" => "paid",
+        "pending" => "pending",
+        _ => "failed",
     };
-    match start_checkout(env, db, &a, &item).await? {
-        Ok((url, _)) => redirect_to(&url),
-        Err(r) => redirect_to(&format!("/langganan?error={}", core::web::query_value(&r.message))),
-    }
-}
-
-/// GET /terima-kasih?order_id=…: where Midtrans sends the browser after paying. For the person whose
-/// order it is, it settles it now (not waiting for the notification) and says how it went.
-async fn thanks(req: &Request, env: &Env, db: &Db, a: Option<Account>) -> Result<Response> {
-    use core::web::Thanks;
-    let url = req.url()?;
-    let q = |k: &str| url.query_pairs().find(|(name, _)| name == k).map(|(_, v)| v.to_string()).unwrap_or_default();
-    let order = q("order_id");
-    let tries = q("n").parse::<u32>().unwrap_or(24).min(24);
-    let (Some(a), Some((owner, _))) = (a, if order.is_empty() { None } else { db.payment_owner(&order).await? }) else {
-        return page(core::web::thanks_page(Thanks::Generic), 200);
-    };
-    if owner != a.id {
-        return page(core::web::thanks_page(Thanks::Generic), 200);
-    }
-    reconcile(env, db, Some(a.id)).await?;
-    let status = db.payment_owner(&order).await?.map(|(_, s)| s).unwrap_or_default();
-    let html = match status.as_str() {
-        "paid" => {
-            let a = db.user(a.id).await?.unwrap_or(a);
-            let v = web_view(&a, &db.catalog().await?);
-            let credits = match &v["credits"]["left"] {
-                Value::String(s) => s.clone(),
-                n => n.as_i64().unwrap_or(0).to_string(),
-            };
-            core::web::thanks_page(Thanks::Paid { plan: v["planName"].as_str().unwrap_or(""), credits: &credits })
-        }
-        "pending" => core::web::thanks_page(Thanks::Checking { order: &order, tries_left: tries }),
-        _ => core::web::thanks_page(Thanks::Failed),
-    };
-    page(html, 200)
+    json_res(
+        200,
+        &json!({
+            "order": id,
+            "status": status,
+            "item": p.item,
+            "name": plan.map(|x| x.name.clone()).unwrap_or_else(|| p.item.clone()),
+            "kind": plan.map(|x| x.kind.id()),
+            "amount": p.amount,
+            "credits": plan.map(|x| x.credits),
+            "account": web_view(&a, &c),
+        }),
+    )
 }
 
 /// GET /download: the latest Windows installer from R2 (uploaded per release; see cloud/README.md).
@@ -883,35 +920,8 @@ async fn fetch(req: Request, env: Env, ctx: Context) -> Result<Response> {
         (Method::Get, "/") => return Response::ok("aina Cloud"),
         (Method::Get, "/privasi") => return Response::from_html(include_str!("privasi.html")),
         (Method::Get, "/ketentuan") => return Response::from_html(include_str!("ketentuan.html")),
-        // The browser's pages: signed in or not, each decides.
-        (Method::Get, "/terima-kasih") => {
-            let a = user_of(&req, &env, &db).await?.map(|(a, _)| a);
-            return thanks(&req, &env, &db, a).await;
-        }
-        // The sign-in page (a Google button); already signed in: straight on.
-        (Method::Get, "/masuk") => {
-            let next = req.url()?.query_pairs().find(|(k, _)| k == "next").and_then(|(_, v)| core::safe_next(&v)).unwrap_or_else(|| "/langganan".into());
-            if user_of(&req, &env, &db).await?.is_some() {
-                return redirect_to(&next);
-            }
-            return page(core::web::login_page(&next), 200);
-        }
-        (Method::Get, "/langganan") => {
-            let a = user_of(&req, &env, &db).await?.map(|(a, _)| a);
-            return web_plans(&req, &env, &db, a).await;
-        }
-        (Method::Post, "/web/checkout") => {
-            let a = user_of(&req, &env, &db).await?.map(|(a, _)| a);
-            return web_checkout(req, &env, &db, a).await;
-        }
-        (Method::Post, "/web/logout") => {
-            if let Some((_, hash)) = user_of(&req, &env, &db).await? {
-                db.drop_token(&hash).await?;
-            }
-            let mut res = redirect_to("/langganan")?;
-            res.headers_mut().set("set-cookie", &core::clear_cookie())?;
-            return Ok(res);
-        }
+        // The browser's pages live on the website now.
+        (Method::Get, "/masuk" | "/langganan" | "/terima-kasih") => return to_frontend(&req, &env),
         (Method::Get, "/download" | "/download/windows") => return download(&env).await,
         (Method::Get, "/v1/plans") => return json_res(200, &db.catalog().await?.public()),
         // The provider's return after sign-in, sent on to Composio by the browser (a 302; the code and
@@ -922,6 +932,7 @@ async fn fetch(req: Request, env: Env, ctx: Context) -> Result<Response> {
         }
         (Method::Get, "/login") => return login(&req, &env, &db).await,
         (Method::Get, "/auth/google/callback") => return google_callback(&req, &env, &db).await,
+        (Method::Get, "/auth/finish") => return auth_finish(&req, &env, &db).await,
         (Method::Post, "/v1/auth/exchange") => return exchange(req, &db).await,
         (Method::Post, "/v1/billing/midtrans") => return midtrans(req, &env, &db).await,
         (_, p) if p.starts_with("/admin/") => {
@@ -940,7 +951,7 @@ async fn fetch(req: Request, env: Env, ctx: Context) -> Result<Response> {
                 reconcile(&env, &db, Some(a.id)).await?;
             }
             let a = db.user(a.id).await?.unwrap_or(a);
-            json_res(200, &a.view(&db.catalog().await?, now()))
+            json_res(200, &web_view(&a, &db.catalog().await?))
         }
         // Card subscriptions: stop renewing (the plan runs to the end of its cycle), renew again, or
         // forget the card. Answers with the account as /v1/account does.
@@ -969,9 +980,13 @@ async fn fetch(req: Request, env: Env, ctx: Context) -> Result<Response> {
         }
         (Method::Post, "/v1/auth/logout") => {
             db.drop_token(&hash).await?;
-            json_res(200, &json!({ "ok": true }))
+            // The browser's session cookie goes too (nothing for the app, which sends no cookie).
+            let mut res = json_res(200, &json!({ "ok": true }))?;
+            res.headers_mut().set("set-cookie", &core::clear_cookie())?;
+            Ok(res)
         }
         (Method::Post, "/v1/checkout") => checkout(req, &env, &db, &a).await,
+        (Method::Get, p) if p.starts_with("/v1/orders/") => order(&env, &db, &a, p.trim_start_matches("/v1/orders/")).await,
         (Method::Post, "/v1/messages") => messages(req, env.clone(), &ctx, &db, a, false).await,
         (Method::Post, "/v1/messages/count_tokens") => messages(req, env.clone(), &ctx, &db, a, true).await,
         (Method::Post, "/v1/audio/transcriptions") => transcribe(req, &env, &db, a).await,

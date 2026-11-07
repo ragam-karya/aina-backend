@@ -12,6 +12,8 @@ use crate::plans::{Catalog, Kind, MILLI, Meter, Plan, claude_cost, date, model_a
 pub struct Account {
     pub id: i64,
     pub email: String,
+    /// The name Google gives (None until the first sign-in that brings one).
+    pub name: Option<String>,
     /// The subscription plan's id while there is or was one; "free" or "beta" otherwise.
     pub plan: String,
     /// When the current subscription cycle ends (0 without one).
@@ -77,6 +79,7 @@ impl Account {
         if self.unlimited() {
             return json!({
                 "email": self.email,
+                "name": self.name,
                 "plan": UNLIMITED,
                 "planName": "Tanpa batas",
                 "subscribed": false,
@@ -98,6 +101,7 @@ impl Account {
         };
         json!({
             "email": self.email,
+            "name": self.name,
             "plan": if sub.is_some() { self.plan.as_str() } else if self.plan == "beta" { "beta" } else { "free" },
             "planName": name,
             "subscribed": sub.is_some(),
@@ -428,7 +432,7 @@ mod tests {
     const NOW: i64 = 1_792_398_000_000;
 
     fn account(plan: &str, until: i64, sub_left: i64, topup: i64) -> Account {
-        Account { id: 1, email: "a@b.id".into(), plan: plan.into(), plan_until: until, composio_user: "badi_x".into(), meter: Meter { sub_left, topup }, free_claimed: false, renewal: Renewal::default() }
+        Account { id: 1, email: "a@b.id".into(), name: None, plan: plan.into(), plan_until: until, composio_user: "badi_x".into(), meter: Meter { sub_left, topup }, free_claimed: false, renewal: Renewal::default() }
     }
 
     #[test]
