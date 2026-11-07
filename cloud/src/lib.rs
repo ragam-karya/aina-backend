@@ -154,7 +154,9 @@ async fn login(req: &Request, env: &Env, db: &Db) -> Result<Response> {
         None => app_state,
     };
     db.put_oauth_state(&state, &kept, next.as_deref(), t + core::OAUTH_STATE_TTL_MS, t).await?;
-    let mut res = Response::redirect(Url::parse(&core::google_auth_url(&client, &callback_url(env), &state))?)?;
+    // Built by hand: Response::redirect's headers can't take the nonce cookie.
+    let mut res = Response::empty()?.with_status(302);
+    res.headers_mut().set("location", &core::google_auth_url(&client, &callback_url(env), &state))?;
     if let Some(n) = nonce {
         res.headers_mut().set("set-cookie", &core::login_cookie(&n))?;
     }
