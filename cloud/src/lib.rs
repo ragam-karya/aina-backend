@@ -109,8 +109,11 @@ impl Drop for Booked {
 
 // ---------- accounts ----------
 
+/// Where Google sends the person back: the website's /api proxy, so Google shows the website's address
+/// (it must be an Authorized redirect URI of the OAuth client). The app's logins come back here too;
+/// their state is in D1, so the address they started from doesn't matter.
 fn callback_url(env: &Env) -> String {
-    format!("{}/auth/google/callback", secret(env, "PUBLIC_URL").trim_end_matches('/'))
+    format!("{}/api/auth/google/callback", frontend_url(env))
 }
 
 /// The website with the sign-in, plans and thanks pages (FRONTEND_URL in wrangler.toml).
