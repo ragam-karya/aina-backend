@@ -8,6 +8,9 @@ command = "cargo install -q worker-build && worker-build --release"
 
 [vars]
 PUBLIC_URL = "https://badi-cloud.faisalmashuri16.workers.dev"
+# The website with the sign-in, plans and thanks pages; it reaches this Worker through its /api proxy
+# (a service binding), so the session cookie lives on its domain.
+FRONTEND_URL = "https://aina.ai.id"
 GOOGLE_CLIENT_ID = "905981309985-ng04qcnc94pckpvc0unids6cu1l3ehc0.apps.googleusercontent.com"
 MIDTRANS_PRODUCTION = "0"
 # The closed beta: "1" lets in only the emails on the invite list (admin API), each with the beta credit.

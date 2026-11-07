@@ -71,7 +71,7 @@ pub fn google_auth_url(client_id: &str, redirect_uri: &str, state: &str) -> Stri
         "{GOOGLE_AUTH}?client_id={}&redirect_uri={}&response_type=code&scope={}&state={}&prompt=select_account",
         enc(client_id),
         enc(redirect_uri),
-        enc("openid email"),
+        enc("openid email profile"),
         enc(state)
     )
 }
@@ -81,17 +81,22 @@ pub fn google_token_form(client_id: &str, secret: &str, redirect_uri: &str, code
     format!("code={}&client_id={}&client_secret={}&redirect_uri={}&grant_type=authorization_code", enc(code), enc(client_id), enc(secret), enc(redirect_uri))
 }
 
-/// The verified email in Google's ID token for our client, or None. The token came straight from
-/// Google's token endpoint over TLS with our secret, so its claims are read without re-checking the
-/// signature (OpenID Connect Core §3.1.3.7).
-pub fn google_email(id_token: &str, client_id: &str) -> Option<String> {
+/// The verified email in Google's ID token for our client and the person's name when Google gives one,
+/// or None. The token came straight from Google's token endpoint over TLS with our secret, so its claims
+/// are read without re-checking the signature (OpenID Connect Core §3.1.3.7).
+pub fn google_profile(id_token: &str, client_id: &str) -> Option<(String, Option<String>)> {
     use base64::Engine;
     let payload = id_token.split('.').nth(1)?;
     let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(payload.trim_end_matches('=')).ok()?;
     let claims: Value = serde_json::from_slice(&bytes).ok()?;
     let issuer_ok = matches!(claims["iss"].as_str(), Some("https://accounts.google.com" | "accounts.google.com"));
     let verified = claims["email_verified"] == true || claims["email_verified"] == "true";
-    (issuer_ok && claims["aud"] == client_id && verified).then(|| claims["email"].as_str().map(|e| e.trim().to_lowercase())).flatten()
+    if !(issuer_ok && claims["aud"] == client_id && verified) {
+        return None;
+    }
+    let email = claims["email"].as_str()?.trim().to_lowercase();
+    let name = claims["name"].as_str().map(|n| n.trim().chars().filter(|c| !c.is_control()).take(80).collect::<String>()).filter(|n| !n.is_empty());
+    Some((email, name))
 }
 
 /// The page that hands the login back to the app.
@@ -108,10 +113,31 @@ pub fn esc(s: &str) -> String {
 }
 
 // ---------- the web session (subscribing from the browser, without the app) ----------
-// /login?next=/langganan signs the browser in instead of the app: the callback sets an HttpOnly cookie
-// holding a device token like the app's (label "web") and goes back to `next`, on this site only.
+// The pages live on the website (FRONTEND_URL), which reaches this Worker through a proxy at /api.
+// /login?next=/langganan (opened at FRONTEND_URL/api/login) signs the browser in instead of the app: it
+// leaves a nonce in LOGIN_COOKIE on the website's domain; the callback keeps a one-use code for that
+// login and sends the browser to FRONTEND_URL/api/auth/finish, which trades it, with the same nonce,
+// for an HttpOnly cookie holding a device token like the app's (label "web"), then goes on to `next`,
+// a page of the website. The nonce ties the code to the browser that started the login, so a code
+// sent to someone else can't sign them into another account.
 
 pub const SESSION_COOKIE: &str = "badi_session";
+pub const LOGIN_COOKIE: &str = "badi_login";
+
+/// What a web login keeps as its app state: the hash of its browser's nonce. Never a valid app state,
+/// so the app can't take a web login's code.
+pub fn web_login_state(nonce: &str) -> String {
+    format!("web:{}", sha256(nonce))
+}
+
+/// The nonce of a login started in this browser, for /auth/finish only, while the login may last.
+pub fn login_cookie(nonce: &str) -> String {
+    format!("{LOGIN_COOKIE}={nonce}; HttpOnly; Secure; SameSite=Lax; Path=/api/auth; Max-Age={}", (OAUTH_STATE_TTL_MS + GRANT_TTL_MS) / 1000)
+}
+
+pub fn clear_login_cookie() -> String {
+    format!("{LOGIN_COOKIE}=; HttpOnly; Secure; SameSite=Lax; Path=/api/auth; Max-Age=0")
+}
 const SESSION_MAX_AGE_S: i64 = 30 * 86_400;
 
 /// Where to go after a web login: a path on this site, or None (`//host`, a scheme or `\` would leave it).
@@ -136,10 +162,10 @@ pub fn clear_cookie() -> String {
     format!("{SESSION_COOKIE}=; HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age=0")
 }
 
-/// A form posted with the session cookie came from this site (the Origin header, which browsers set on
-/// every POST): a page elsewhere can't buy or sign out for the person.
-pub fn same_origin(origin: Option<&str>, public_url: &str) -> bool {
-    origin.is_some_and(|o| o.trim_end_matches('/').eq_ignore_ascii_case(public_url.trim_end_matches('/')))
+/// A call made with the session cookie came from one of our sites (the Origin header, which browsers set
+/// on every POST): a page elsewhere can't buy or sign out for the person.
+pub fn same_origin(origin: Option<&str>, sites: &[&str]) -> bool {
+    origin.is_some_and(|o| sites.iter().any(|s| !s.is_empty() && o.trim_end_matches('/').eq_ignore_ascii_case(s.trim_end_matches('/'))))
 }
 
 /// A plain page for login problems.
@@ -294,17 +320,24 @@ mod tests {
         assert!(same(&sha256("x"), &sha256("x")) && !same(&sha256("x"), &sha256("y")));
         assert!(valid_app_state(&random_hex(32)) && !valid_app_state("short") && !valid_app_state(&format!("{}<", random_hex(20))));
         let url = google_auth_url("cid.apps", "https://w.dev/auth/google/callback", "st");
-        assert!(url.contains("redirect_uri=https%3A%2F%2Fw.dev%2Fauth%2Fgoogle%2Fcallback") && url.contains("scope=openid%20email"));
+        assert!(url.contains("redirect_uri=https%3A%2F%2Fw.dev%2Fauth%2Fgoogle%2Fcallback") && url.contains("scope=openid%20email%20profile"));
+        let web = web_login_state("nonce1");
+        assert!(!valid_app_state(&web), "the app can never take a web login's code");
+        assert!(web.starts_with("web:") && !web.contains("nonce1") && web != web_login_state("nonce2"));
+        assert!(login_cookie("n").contains("Path=/api/auth") && login_cookie("n").contains("HttpOnly") && clear_login_cookie().contains("Max-Age=0"));
         let jwt = |claims: Value| format!("h.{}.s", base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(claims.to_string()));
         let good = json!({ "iss": "https://accounts.google.com", "aud": "cid.apps", "email": "Sari@Gmail.com", "email_verified": true });
-        assert_eq!(google_email(&jwt(good.clone()), "cid.apps").as_deref(), Some("sari@gmail.com"));
-        assert_eq!(google_email(&jwt(good.clone()), "other"), None, "a token for another client");
+        assert_eq!(google_profile(&jwt(good.clone()), "cid.apps"), Some(("sari@gmail.com".into(), None)));
+        let mut named = good.clone();
+        named["name"] = json!("  Sari Wulandari\n");
+        assert_eq!(google_profile(&jwt(named), "cid.apps"), Some(("sari@gmail.com".into(), Some("Sari Wulandari".into()))));
+        assert_eq!(google_profile(&jwt(good.clone()), "other"), None, "a token for another client");
         let mut unverified = good.clone();
         unverified["email_verified"] = json!(false);
-        assert_eq!(google_email(&jwt(unverified), "cid.apps"), None);
+        assert_eq!(google_profile(&jwt(unverified), "cid.apps"), None);
         let mut forged = good;
         forged["iss"] = json!("https://evil.example");
-        assert_eq!(google_email(&jwt(forged), "cid.apps"), None);
+        assert_eq!(google_profile(&jwt(forged), "cid.apps"), None);
         let page = back_to_app_page("abc", "st1");
         assert!(page.contains("badi://login?code=abc&state=st1"));
         assert!(login_problem_page("<x>").contains("&lt;x&gt;"));
@@ -351,9 +384,12 @@ mod tests {
         let c = session_cookie("bct_x");
         assert!(c.contains("HttpOnly") && c.contains("Secure") && c.contains("SameSite=Lax"));
         assert!(clear_cookie().contains("Max-Age=0"));
-        assert!(same_origin(Some("https://badi-cloud.x.workers.dev"), "https://badi-cloud.x.workers.dev/"));
-        assert!(!same_origin(Some("https://evil.com"), "https://badi-cloud.x.workers.dev"));
-        assert!(!same_origin(None, "https://badi-cloud.x.workers.dev"));
+        let sites = ["https://badi-cloud.x.workers.dev/", "https://aina.ai.id"];
+        assert!(same_origin(Some("https://badi-cloud.x.workers.dev"), &sites));
+        assert!(same_origin(Some("https://aina.ai.id"), &sites), "the website, through its /api proxy");
+        assert!(!same_origin(Some("https://evil.com"), &sites));
+        assert!(!same_origin(None, &sites));
+        assert!(!same_origin(Some(""), &["", "https://aina.ai.id"]), "an unset site matches nothing");
     }
 
     #[test]
