@@ -172,13 +172,15 @@ pub struct Meter {
 }
 
 impl Meter {
-    /// Credits that can be spent now (subscription credits only while the subscription runs).
+    /// Credits that can be spent now (subscription credits only while the subscription runs). Negative:
+    /// the account owes credits (a call that ended past zero), repaid by the next top-up or cycle.
     pub fn left(&self, sub_on: bool) -> i64 {
-        (if sub_on { self.sub_left.max(0) } else { 0 }) + self.topup.max(0)
+        (if sub_on { self.sub_left.max(0) } else { 0 }) + self.topup
     }
 
-    /// Books milli-credits: the subscription's first (they lapse), then the rest. A running task may
-    /// end a little past zero; that is not carried as debt.
+    /// Books milli-credits: the subscription's first (they lapse), then the rest. What goes past zero is
+    /// carried as debt in `topup` (never forgiven), so overshooting the limit can't be free. The Worker
+    /// books the same split atomically in SQL (Db::spend); this is its reference.
     pub fn spend(&mut self, credits: i64, sub_on: bool) {
         let mut c = credits.max(0);
         if sub_on {
@@ -186,7 +188,7 @@ impl Meter {
             self.sub_left -= from_sub;
             c -= from_sub;
         }
-        self.topup = (self.topup - c).max(0);
+        self.topup -= c;
     }
 }
 
@@ -339,7 +341,10 @@ mod tests {
         m.spend(6_000, true);
         assert_eq!((m.sub_left, m.topup), (0, 2_000));
         m.spend(2_500, true);
-        assert_eq!((m.sub_left, m.topup), (0, 0), "no debt past zero");
+        assert_eq!((m.sub_left, m.topup), (0, -500), "going past zero is owed, not forgiven");
+        assert_eq!(m.left(true), -500);
+        m.topup += 65_000; // a Top-Up repays the debt first
+        assert_eq!(m.left(false), 64_500);
         let mut lapsed = Meter { sub_left: 5_000, topup: 1_000 };
         lapsed.spend(400, false);
         assert_eq!((lapsed.sub_left, lapsed.topup), (5_000, 600));
