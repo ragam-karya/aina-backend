@@ -162,6 +162,20 @@ pub fn clear_cookie() -> String {
     format!("{SESSION_COOKIE}=; HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age=0")
 }
 
+/// A comma-separated list of addresses (e.g. ALT_PUBLIC_URLS, the Worker's other hostnames while it
+/// moves domain), blanks dropped.
+pub fn url_list(list: &str) -> Vec<String> {
+    list.split(',').map(str::trim).filter(|u| !u.is_empty()).map(String::from).collect()
+}
+
+/// The host of a request (e.g. "be.aina.ai.id") is one of the addresses in a comma-separated list of
+/// URLs (ALT_PUBLIC_URLS): a call on an address the Worker is moving away from.
+pub fn host_listed(host: &str, list: &str) -> bool {
+    let bare = |u: &str| u.trim().trim_start_matches("https://").trim_start_matches("http://").split('/').next().unwrap_or("").to_ascii_lowercase();
+    let host = bare(host);
+    !host.is_empty() && url_list(list).iter().any(|u| bare(u) == host)
+}
+
 /// A call made with the session cookie came from one of our sites (the Origin header, which browsers set
 /// on every POST): a page elsewhere can't buy or sign out for the person.
 pub fn same_origin(origin: Option<&str>, sites: &[&str]) -> bool {
@@ -390,6 +404,29 @@ mod tests {
         assert!(!same_origin(Some("https://evil.com"), &sites));
         assert!(!same_origin(None, &sites));
         assert!(!same_origin(Some(""), &["", "https://aina.ai.id"]), "an unset site matches nothing");
+    }
+
+    #[test]
+    fn the_worker_answers_on_its_other_hostnames_too() {
+        assert_eq!(url_list(" https://be.aina.ai.id , ,https://badi-cloud.x.workers.dev/ "), vec!["https://be.aina.ai.id", "https://badi-cloud.x.workers.dev/"]);
+        assert!(url_list("").is_empty() && url_list(" , ").is_empty());
+        let mut sites = vec!["https://badi-cloud.x.workers.dev".to_string(), "https://aina.ai.id".to_string()];
+        sites.extend(url_list("https://be.aina.ai.id"));
+        let sites: Vec<&str> = sites.iter().map(String::as_str).collect();
+        assert!(same_origin(Some("https://be.aina.ai.id"), &sites), "the new domain");
+        assert!(same_origin(Some("https://badi-cloud.x.workers.dev"), &sites), "the old one still");
+        assert!(!same_origin(Some("https://evil.aina.ai.id"), &sites));
+    }
+
+    #[test]
+    fn calls_on_an_old_address_are_told_apart() {
+        let alt = "https://badi-cloud.x.workers.dev/, https://old.example";
+        assert!(host_listed("badi-cloud.x.workers.dev", alt));
+        assert!(host_listed("BADI-CLOUD.x.workers.dev", alt), "hosts ignore case");
+        assert!(host_listed("old.example", alt));
+        assert!(!host_listed("be.aina.ai.id", alt), "the current address");
+        assert!(!host_listed("x.workers.dev", alt));
+        assert!(!host_listed("", alt) && !host_listed("be.aina.ai.id", ""));
     }
 
     #[test]

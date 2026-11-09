@@ -3,11 +3,35 @@ name = "badi-cloud"
 main = "build/worker/shim.mjs"
 compatibility_date = "2026-10-01"
 
+# Two hostnames, one Worker: be.aina.ai.id (the new address) and badi-cloud.<account>.workers.dev,
+# which installed apps still call. Keep workers_dev on until that traffic is gone
+# (docs/plan-custom-domain-be.md, BE-18).
+workers_dev = true
+preview_urls = true
+routes = [{ pattern = "be.aina.ai.id", custom_domain = true }]
+
+# Workers Logs: each request's URL (so its hostname) is kept, to watch the old address empty out.
+# Sampled to stay well inside the free log quota; enough to compare hostnames.
+[observability]
+enabled = true
+head_sampling_rate = 0.1
+
 [build]
 command = "cargo install -q worker-build && worker-build --release"
 
 [vars]
-PUBLIC_URL = "https://badi-cloud.faisalmashuri16.workers.dev"
+PUBLIC_URL = "https://be.aina.ai.id"
+# This Worker's other addresses, comma-separated: accepted as our own origin for cookie calls.
+# The workers.dev address stays here until installed apps have moved off it (BE-18).
+ALT_PUBLIC_URLS = "https://badi-cloud.faisalmashuri16.workers.dev"
+# BE-17, off while empty: the message the app's calls on an ALT_PUBLIC_URLS address get instead of an
+# answer (HTTP 426), once old installs should update, e.g.
+# "Versi aina ini sudah tidak didukung. Unduh versi terbaru di https://aina.ai.id/api/download".
+RETIRED_HOST_MESSAGE = ""
+# Base of the Composio OAuth redirect proxy (/api/composio-redirect) for auth configs registered with
+# viaBadi. Pinned so it never follows PUBLIC_URL by accident; whatever is set here must also be an
+# Authorized redirect URI in the provider's OAuth app. (2026-11-09: no auth config uses viaBadi.)
+COMPOSIO_REDIRECT_BASE = "https://be.aina.ai.id"
 # The website with the sign-in, plans and thanks pages; it reaches this Worker through its /api proxy
 # (a service binding), so the session cookie lives on its domain.
 FRONTEND_URL = "https://aina.ai.id"
@@ -37,5 +61,7 @@ migrations_dir = "migrations"
 # Secrets (never in this file): wrangler secret put <NAME>
 #   ANTHROPIC_API_KEY, OPENAI_API_KEY, ELEVENLABS_API_KEY, COMPOSIO_API_KEY (ak_…),
 #   COMPOSIO_AUTH_CONFIGS (JSON, optional white-label), MIDTRANS_SERVER_KEY (sandbox SB-Mid-server-… first),
+#   MIDTRANS_SIGNATURE_KEY (the dashboard's Signature Secret Key, which signs payment notifications;
+#   left unset, the Server Key is used, as older accounts sign with it),
 #   GOOGLE_CLIENT_SECRET
 #   ADMIN_TOKEN: the key for the admin API (/admin/beta, /admin/credit), at least 24 characters.
