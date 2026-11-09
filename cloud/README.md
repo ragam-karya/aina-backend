@@ -8,7 +8,7 @@ Akun berlangganan untuk B.A.D.I.:
   - Dashboard Midtrans → Settings → Configuration: *Payment Notification URL* = `https://<worker>/v1/billing/midtrans`. Notifikasi yang hilang tetap tertangani: order `pending` dicek ke `/v2/{order}/status` saat app membaca akun dan oleh cron.
   - **Langganan dari web** (tanpa app): halaman `/masuk`, `/langganan`, `/terima-kasih` ada di website (`FRONTEND_URL`, repo `aina-web`), yang memanggil Worker ini lewat proxy `/api/*` (service binding). Alur: `aina.ai.id/masuk` → `/api/login?next=/langganan` (set cookie nonce `badi_login`) → Google → `FRONTEND_URL/api/auth/google/callback` (lewat proxy ke `/auth/google/callback`) → `aina.ai.id/api/auth/finish?code=…` (kode sekali pakai + nonce yang sama) → cookie sesi `badi_session` (HttpOnly, Secure, SameSite=Lax; token `bct_` berlabel `web`) di domain website → `GET /v1/account`, `GET /v1/plans`, `POST /v1/checkout` → Snap → `aina.ai.id/terima-kasih?order_id=…` (`callbacks.finish` per transaksi) → `GET /v1/orders/{id}`. Path lama di Worker (`/masuk`, `/langganan`, `/terima-kasih`) redirect ke website. Kredit gratis tetap hanya dari login pertama lewat app di PC. Panggilan bercookie selain GET wajib `Origin` = `PUBLIC_URL` atau `FRONTEND_URL`.
   - **Installer di R2**: sekali `wrangler r2 bucket create badi-downloads`, lalu tiap rilis:
-    `wrangler r2 object put badi-downloads/windows/latest --remote --file "../target/release/bundle/nsis/B.A.D.I._<versi>_x64-setup.exe" --content-type application/octet-stream --content-disposition "attachment; filename=\"B.A.D.I._<versi>_x64-setup.exe\""`
+    `wrangler r2 object put badi-downloads/windows/latest --remote --file "../target/release/bundle/nsis/aina_<versi>_x64-setup.exe" --content-type application/octet-stream --content-disposition "attachment; filename=\"aina_<versi>_x64-setup.exe\""`
   - **Production:** minta Midtrans mengaktifkan fitur simpan kartu (One Click / tokenisasi kartu) untuk merchant, lalu `MIDTRANS_PRODUCTION = "1"` dan server key production.
 - Proxy yang memegang key Anthropic, OpenAI, ElevenLabs dan Composio.
 
@@ -32,10 +32,10 @@ rustup target add wasm32-unknown-unknown
 wrangler login
 wrangler d1 create badi-cloud                     # salin database_id ke wrangler.toml
 wrangler d1 migrations apply badi-cloud --remote
-wrangler deploy                                   # catat URL-nya: https://badi-cloud.<akun>.workers.dev
+wrangler deploy                                   # Worker hidup di https://be.aina.ai.id (custom domain) dan https://badi-cloud.<akun>.workers.dev
 ```
 
-Isi `PUBLIC_URL` (URL di atas) dan `GOOGLE_CLIENT_ID` di `wrangler.toml`, lalu secret:
+Isi `PUBLIC_URL` (`https://be.aina.ai.id`; alamat lain Worker ini, mis. workers.dev, di `ALT_PUBLIC_URLS`) dan `GOOGLE_CLIENT_ID` di `wrangler.toml`, lalu secret:
 
 ```powershell
 wrangler secret put GOOGLE_CLIENT_SECRET
@@ -45,6 +45,7 @@ wrangler secret put ELEVENLABS_API_KEY
 wrangler secret put COMPOSIO_API_KEY       # project key ak_…
 wrangler secret put COMPOSIO_AUTH_CONFIGS  # opsional: {"gmail":"ac_…",…} supaya login aplikasi kerja atas nama B.A.D.I.
 wrangler secret put MIDTRANS_SERVER_KEY    # SB-Mid-server-… (sandbox); MIDTRANS_PRODUCTION = "1" nanti untuk live
+wrangler secret put MIDTRANS_SIGNATURE_KEY # Signature Secret Key dari dashboard (penanda tangan notifikasi); kosong = pakai Server Key
 wrangler deploy
 ```
 
@@ -52,9 +53,9 @@ wrangler deploy
 - Authorized redirect URI: `https://aina.ai.id/api/auth/google/callback` (`FRONTEND_URL` + `/api/auth/google/callback`; login app dan web sama-sama kembali lewat sini)
 - Consent screen: scope `openid` dan `email` saja (tidak butuh verifikasi Google untuk scope ini). Nama aplikasi B.A.D.I., beserta link `/privasi` dan `/ketentuan` dari Worker ini.
 
-**Midtrans sandbox:** Dashboard → Settings → Payment → Notification URL: `https://badi-cloud.<akun>.workers.dev/v1/billing/midtrans`.
+**Midtrans sandbox:** Dashboard → Settings → Payment → Notification URL: `https://be.aina.ai.id/v1/billing/midtrans`.
 
-**App:** isi `cloudUrl` di config, atau `BADI_CLOUD_URL` saat dev, dengan URL Worker.
+**App:** default-nya `https://be.aina.ai.id` (di-build lewat `BADI_CLOUD_URL`); isi `cloudUrl` di config, atau `BADI_CLOUD_URL` saat dev, untuk Worker lain.
 
 ## Lokal
 

@@ -48,6 +48,14 @@ fn header(req: &Request, k: &str) -> Option<String> {
     req.headers().get(k).ok().flatten()
 }
 
+/// Our own sites: this Worker (PUBLIC_URL, and ALT_PUBLIC_URLS, its other hostnames while it moves
+/// domain) and the website.
+fn own_sites(env: &Env) -> Vec<String> {
+    let mut sites = vec![secret(env, "PUBLIC_URL"), frontend_url(env)];
+    sites.extend(core::url_list(&secret(env, "ALT_PUBLIC_URLS")));
+    sites
+}
+
 /// The account behind a call: its token in x-api-key, xi-api-key or Authorization: Bearer (the app), or
 /// the session cookie (the browser; a POST with it must come from our own pages: the website's, through
 /// its /api proxy, or this Worker's).
@@ -59,7 +67,9 @@ async fn user_of(req: &Request, env: &Env, db: &Db) -> Result<Option<(Account, S
         Some(t) => Some(t),
         None => {
             let t = core::cookie(header(req, "cookie").as_deref(), core::SESSION_COOKIE);
-            if t.is_some() && req.method() != Method::Get && !core::same_origin(header(req, "origin").as_deref(), &[&secret(env, "PUBLIC_URL"), &frontend_url(env)]) {
+            let sites = own_sites(env);
+            let sites: Vec<&str> = sites.iter().map(String::as_str).collect();
+            if t.is_some() && req.method() != Method::Get && !core::same_origin(header(req, "origin").as_deref(), &sites) {
                 return Ok(None);
             }
             t
@@ -579,7 +589,18 @@ fn midtrans_headers(key: &str) -> Vec<(&'static str, String)> {
 
 async fn midtrans(mut req: Request, env: &Env, db: &Db) -> Result<Response> {
     let n: Value = req.json().await.unwrap_or(Value::Null);
-    if !core::signature_ok(&n, &secret(env, "MIDTRANS_SERVER_KEY")) {
+    // Notifications are signed with the account's Signature Secret Key, which Midtrans now keeps apart
+    // from the Server Key (API calls); older accounts sign with the Server Key, the fallback.
+    let key = Some(secret(env, "MIDTRANS_SIGNATURE_KEY")).filter(|k| !k.is_empty()).unwrap_or_else(|| secret(env, "MIDTRANS_SERVER_KEY"));
+    if !core::signature_ok(&n, &key) {
+        // What was signed, and which key we checked it with (a short fingerprint, never the key), so a
+        // mismatch can be traced: the fields can be re-signed by hand and the fingerprint compared.
+        let s = |k: &str| n[k].as_str().map(String::from).unwrap_or_else(|| n[k].to_string());
+        console_log!(
+            "[billing] bad signature: order={} status_code={} gross_amount={} signature={}… key_sha256={}… key_len={}",
+            s("order_id"), s("status_code"), s("gross_amount"), s("signature_key").chars().take(16).collect::<String>(),
+            &core::sha256(&key)[..12], key.len()
+        );
         return Response::error("Forbidden", 403);
     }
     settle(db, &n).await?;
@@ -937,8 +958,11 @@ async fn composio_call(env: &Env, method: Method, path: &str, query: &str, body:
 }
 
 /// Badi Cloud's OAuth redirect proxy, for the providers' consoles.
+/// Its base is COMPOSIO_REDIRECT_BASE when set, else PUBLIC_URL: the URI is kept by Composio and the
+/// providers' consoles, so it must not move just because the Worker's address does.
 fn proxy_uri(env: &Env) -> String {
-    format!("{}{}", secret(env, "PUBLIC_URL").trim_end_matches('/'), rules::REDIRECT_PROXY_PATH)
+    let base = Some(secret(env, "COMPOSIO_REDIRECT_BASE")).filter(|b| !b.is_empty()).unwrap_or_else(|| secret(env, "PUBLIC_URL"));
+    format!("{}{}", base.trim_end_matches('/'), rules::REDIRECT_PROXY_PATH)
 }
 
 /// Sign-in as B.A.D.I.: { app slug: "ac_…" }, from the admin API (D1), over the older
@@ -1041,6 +1065,14 @@ async fn fetch(req: Request, env: Env, ctx: Context) -> Result<Response> {
             return admin(req, &env, &db, &rest).await;
         }
         _ => {}
+    }
+    // Retiring an old address (docs/plan-custom-domain-be.md, BE-17): once RETIRED_HOST_MESSAGE is set,
+    // the app's calls on an address in ALT_PUBLIC_URLS get that message instead of an answer. Installed
+    // apps still built for that address show it (they print error.message), so it can point to the
+    // update. Public pages, sign-in, downloads and the payment notifications above stay open.
+    let notice = secret(&env, "RETIRED_HOST_MESSAGE");
+    if !notice.is_empty() && core::host_listed(req.url()?.host_str().unwrap_or(""), &secret(&env, "ALT_PUBLIC_URLS")) {
+        return error(426, "upgrade_required", &notice);
     }
     // Everything else needs an account.
     let Some((a, hash)) = user_of(&req, &env, &db).await? else { return refuse(rules::unauthorized()) };

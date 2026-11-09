@@ -9,7 +9,7 @@
     "bearer": [{ "key": "token", "value": "{{adminToken}}", "type": "string" }]
   },
   "variable": [
-    { "key": "baseUrl", "value": "https://badi-cloud.faisalmashuri16.workers.dev" },
+    { "key": "baseUrl", "value": "https://be.aina.ai.id" },
     { "key": "adminToken", "value": "" }
   ],
   "item": [

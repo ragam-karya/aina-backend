@@ -730,8 +730,8 @@ mod tests {
         assert_eq!(b["auth_config"]["credentials"]["client_id"], "cid");
         assert_eq!(b["auth_config"]["type"], "use_custom_auth");
         assert_eq!(b["auth_config"]["credentials"]["oauth_redirect_uri"], COMPOSIO_CALLBACK);
-        let p = brand_auth_config("gmail", "cid", "sec", Some("https://badi-cloud.faisalmashuri16.workers.dev/api/composio-redirect"));
-        assert_eq!(p["auth_config"]["credentials"]["oauth_redirect_uri"],"https://badi-cloud.faisalmashuri16.workers.dev/api/composio-redirect");
+        let p = brand_auth_config("gmail", "cid", "sec", Some("https://be.aina.ai.id/api/composio-redirect"));
+        assert_eq!(p["auth_config"]["credentials"]["oauth_redirect_uri"],"https://be.aina.ai.id/api/composio-redirect");
         assert_eq!(composio_callback_url("?code=abc&state=xyz"), "https://backend.composio.dev/api/v3/toolkits/auth/callback?code=abc&state=xyz");
         assert_eq!(composio_callback_url(""), COMPOSIO_CALLBACK);
     }
