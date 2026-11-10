@@ -266,7 +266,12 @@ pub fn when(ms: i64) -> String {
 
 // (year, month, day, seconds into the day) in WIB.
 fn civil(ms: i64) -> (i64, i64, i64, i64) {
-    let secs = ms / 1000 + 7 * 3600;
+    civil_at(ms, 7 * 3600)
+}
+
+/// (year, month, day, seconds into the day) at `offset` seconds from UTC.
+pub(crate) fn civil_at(ms: i64, offset: i64) -> (i64, i64, i64, i64) {
+    let secs = ms.div_euclid(1000) + offset;
     let (day, sec) = (secs.div_euclid(86_400), secs.rem_euclid(86_400));
     let z = day + 719_468;
     let era = z.div_euclid(146_097);
@@ -309,12 +314,12 @@ mod tests {
     #[test]
     fn the_public_list_groups_plans_and_hides_notes() {
         let mut c = Catalog::defaults();
-        c.enterprise_contact = "mailto:sales@badi.id".into();
+        c.enterprise_contact = "mailto:sales@aina.ai.id".into();
         let v = c.public();
         let ids = |k: &str| v[k].as_array().unwrap().iter().map(|p| p["id"].as_str().unwrap().to_string()).collect::<Vec<_>>();
         assert_eq!(ids("subscriptions"), ["basic", "pro"]);
         assert_eq!(ids("topups"), ["topup_small", "topup_medium", "topup_large"]);
-        assert_eq!(v["enterprise"]["contact"], "mailto:sales@badi.id");
+        assert_eq!(v["enterprise"]["contact"], "mailto:sales@aina.ai.id");
         assert_eq!(v["free"]["credits"], 10);
         assert!(!v.to_string().contains("Decoy"), "internal notes stay internal");
         assert!(!v.to_string().contains("\"beta\""), "an inactive plan is not offered");

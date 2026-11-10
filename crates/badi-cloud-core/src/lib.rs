@@ -4,6 +4,7 @@
 
 pub mod plans;
 pub mod rules;
+pub mod stats;
 pub mod web;
 
 use serde_json::{Value, json};

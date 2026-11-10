@@ -39,6 +39,8 @@ MIDTRANS_PRODUCTION = "1"
 BETA = "0"
 # Accounts that use aina without limits (never charged, buy nothing), comma-separated. Applied at sign-in.
 UNLIMITED_EMAILS = "faisalmashuri16@gmail.com"
+# For the daily analytics rollup (docs/analytics.md), with the secret CF_ANALYTICS_TOKEN.
+CF_ACCOUNT_ID = "d4d0be3bd86e0bc6cbfea92a6bd3c86e"
 
 # The Windows installer for /download (object windows/latest; uploaded per release, see README).
 [[r2_buckets]]
@@ -62,3 +64,9 @@ migrations_dir = "migrations"
 #   left unset, the Server Key is used, as older accounts sign with it),
 #   GOOGLE_CLIENT_SECRET
 #   ADMIN_TOKEN: the key for the admin API (/admin/beta, /admin/credit), at least 24 characters.
+
+# Tracing of the AI calls (src/track.rs): one data point per call, without its content.
+# Queries: docs/analytics.md.
+[[analytics_engine_datasets]]
+binding = "AI_CALLS"
+dataset = "aina_ai_calls"
