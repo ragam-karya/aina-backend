@@ -47,7 +47,7 @@ pub const RENEW_TRIES: i64 = 3;
 /// While those tries run, the subscription stays on past its end.
 pub const RENEW_GRACE_MS: i64 = 3 * crate::plans::DAY_MS;
 
-/// The plan of an account that uses Badi without limits (the owner's, set by email): never refused,
+/// The plan of an account that uses aina without limits (the owner's, set by email): never refused,
 /// never charged, buys nothing.
 pub const UNLIMITED: &str = "owner";
 
@@ -303,17 +303,17 @@ pub fn free_grant(a: &Account, c: &Catalog, pc_claimed: bool) -> Option<i64> {
     c.of_kind(Kind::Free).filter(|p| p.active && p.credits > 0).map(|p| p.credits * MILLI)
 }
 
-/// The Claude models Badi Cloud pays for.
+/// The Claude models aina Cloud pays for.
 pub fn check_model(model: &str) -> Result<(), Refusal> {
     if model_allowed(model) { Ok(()) } else { Err(Refusal::new(403, "plan_limit", format!("Model {model} tidak termasuk aina Cloud."))) }
 }
 
-/// OpenAI voice models Badi Cloud pays for.
+/// OpenAI voice models aina Cloud pays for.
 pub fn check_tts_model(model: &str) -> Result<(), Refusal> {
     if ["gpt-4o-mini-tts", "tts-1"].contains(&model) { Ok(()) } else { Err(Refusal::new(403, "plan_limit", "That voice model is not part of aina Cloud.")) }
 }
 
-/// What the app asks OpenAI for when it opens a realtime session, made safe to pay for: a model Badi
+/// What the app asks OpenAI for when it opens a realtime session, made safe to pay for: a model aina
 /// Cloud offers (the beta always gets the mini one), replies capped, and a secret that only opens a
 /// session in the next minute.
 pub fn realtime_secret_body(body: &Value, beta: bool) -> Result<Value, Refusal> {
@@ -380,14 +380,14 @@ impl UsageMeter {
     }
 }
 
-/// The Composio apps Badi offers.
+/// The Composio apps aina offers.
 pub const COMPOSIO_TOOLKITS: [&str; 17] = [
     "gmail", "googlecalendar", "googledrive", "googledocs", "googlesheets", "googletasks", "outlook", "microsoft_teams", "notion", "linear", "jira", "clickup", "hubspot", "salesforce",
     "dropbox", "github", "slack",
 ];
 
-/// Sign-in as B.A.D.I.: the OAuth app of each provider (registered in its console with Composio's
-/// redirect URI) covers these apps. Registered once on Badi Cloud (the admin API), it is what every
+/// Sign-in as aina: the OAuth app of each provider (registered in its console with Composio's
+/// redirect URI) covers these apps. Registered once on aina Cloud (the admin API), it is what every
 /// account's sign-in page shows instead of Composio.
 pub const COMPOSIO_PROVIDERS: [(&str, &[&str]); 11] = [
     ("google", &["gmail", "googlecalendar", "googledrive", "googledocs", "googlesheets", "googletasks"]),
@@ -406,8 +406,8 @@ pub const COMPOSIO_PROVIDERS: [(&str, &[&str]); 11] = [
 /// Composio's OAuth callback (enter it in each provider's OAuth app).
 pub const COMPOSIO_CALLBACK: &str = "https://backend.composio.dev/api/v3/toolkits/auth/callback";
 
-/// Badi Cloud's own callback path: it only 302-redirects the browser to COMPOSIO_CALLBACK with the same
-/// query, so the provider sends people back to Badi's domain instead of Composio's.
+/// aina Cloud's own callback path: it only 302-redirects the browser to COMPOSIO_CALLBACK with the same
+/// query, so the provider sends people back to aina's domain instead of Composio's.
 pub const REDIRECT_PROXY_PATH: &str = "/api/composio-redirect";
 
 /// Where the redirect proxy sends the browser: Composio's callback with the provider's query, as is.
@@ -419,8 +419,8 @@ pub fn provider_slugs(provider: &str) -> Option<&'static [&'static str]> {
     COMPOSIO_PROVIDERS.iter().find(|(p, _)| *p == provider).map(|(_, s)| *s)
 }
 
-/// The Composio auth config that signs one app in with B.A.D.I.'s own OAuth app. With `redirect_uri`
-/// (Badi Cloud's proxy), the provider returns to Badi's domain; without, to Composio's callback. It is
+/// The Composio auth config that signs one app in with aina's own OAuth app. With `redirect_uri`
+/// (aina Cloud's proxy), the provider returns to aina's domain; without, to Composio's callback. It is
 /// always set: without `oauth_redirect_uri` some toolkits fall back to Composio's old
 /// /api/v1/auth-apps/add, which the OAuth app doesn't list (Google: redirect_uri_mismatch).
 pub fn brand_auth_config(slug: &str, client_id: &str, client_secret: &str, redirect_uri: Option<&str>) -> Value {
@@ -444,7 +444,7 @@ pub enum ComposioRoute {
     Pass,
     /// A direct tool call: send this body (the account's user id).
     Execute(Value),
-    /// Not available through Badi Cloud.
+    /// Not available through aina Cloud.
     Deny,
 }
 

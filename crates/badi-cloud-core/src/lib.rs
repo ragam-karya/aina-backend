@@ -1,4 +1,4 @@
-// Badi Cloud's rules, without any I/O, so the Cloudflare Worker (cloud/) and native tests share them:
+// aina Cloud's rules, without any I/O, so the Cloudflare Worker (cloud/) and native tests share them:
 // the price list and credits, login codes and device tokens, Midtrans checks, what a call may do,
 // how Composio calls are scoped to an account, and billing a Claude reply from its usage.
 
@@ -9,9 +9,9 @@ pub mod web;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256, Sha512};
 
-// ---------- login (Google, back to the app through badi://) ----------
+// ---------- login (Google, back to the app through aina://) ----------
 // The app opens /login?app_state=… in the browser; the Worker sends the person to Google; Google comes
-// back to /auth/google/callback; the Worker opens badi://login?code=…&state=… with a one-use code
+// back to /auth/google/callback; the Worker opens aina://login?code=…&state=… with a one-use code
 // (5 minutes); the app trades it for a device token, but only for the app_state it made itself, so a
 // link from someone else can't sign the app into their account. Only hashes of codes and tokens are kept.
 
@@ -101,7 +101,7 @@ pub fn google_profile(id_token: &str, client_id: &str) -> Option<(String, Option
 
 /// The page that hands the login back to the app.
 pub fn back_to_app_page(code: &str, app_state: &str) -> String {
-    let link = format!("badi://login?code={}&state={}", enc(code), enc(app_state));
+    let link = format!("aina://login?code={}&state={}", enc(code), enc(app_state));
     format!(
         "<!doctype html><html lang=\"id\"><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\"><link href=\"https://fonts.googleapis.com/css2?family=Urbanist:wght@400;600;700&amp;display=swap\" rel=\"stylesheet\"><title>Masuk ke aina</title><body style=\"font-family:Urbanist,system-ui,'Segoe UI',sans-serif;max-width:520px;margin:0 auto;padding:48px 16px;line-height:1.6\"><h1>Berhasil masuk</h1><p>Kembali ke aina … Kalau browser bertanya, pilih <b>Buka aina</b></p><p><a href=\"{link}\" style=\"display:inline-block;padding:10px 18px;border-radius:8px;background:#2b8aff;color:#fff;text-decoration:none\">Buka aina</a></p><p style=\"color:#667\">Link ini sekali pakai dan berlaku 5 menit. Jendela ini boleh ditutup setelah aina terbuka.</p><script>location.href={link:?};</script></body></html>"
     )
@@ -121,8 +121,8 @@ pub fn esc(s: &str) -> String {
 // a page of the website. The nonce ties the code to the browser that started the login, so a code
 // sent to someone else can't sign them into another account.
 
-pub const SESSION_COOKIE: &str = "badi_session";
-pub const LOGIN_COOKIE: &str = "badi_login";
+pub const SESSION_COOKIE: &str = "aina_session";
+pub const LOGIN_COOKIE: &str = "aina_login";
 
 /// What a web login keeps as its app state: the hash of its browser's nonce. Never a valid app state,
 /// so the app can't take a web login's code.
@@ -201,7 +201,7 @@ pub fn item_name(p: &plans::Plan) -> String {
 
 /// The Snap transaction for an order of a plan from the price list. A subscription asks Midtrans to
 /// keep the card (`card_owner`, the account's id there) when it is paid by card, so it can renew; the
-/// card itself stays with Midtrans and Badi only gets its token.
+/// card itself stays with Midtrans and aina only gets its token.
 pub fn snap_order(order: &str, p: &plans::Plan, email: &str, finish_url: &str, card_owner: &str) -> Value {
     let mut o = json!({
         "transaction_details": { "order_id": order, "gross_amount": p.price },
@@ -353,7 +353,7 @@ mod tests {
         forged["iss"] = json!("https://evil.example");
         assert_eq!(google_profile(&jwt(forged), "cid.apps"), None);
         let page = back_to_app_page("abc", "st1");
-        assert!(page.contains("badi://login?code=abc&state=st1"));
+        assert!(page.contains("aina://login?code=abc&state=st1"));
         assert!(login_problem_page("<x>").contains("&lt;x&gt;"));
     }
 
@@ -367,14 +367,14 @@ mod tests {
         assert_eq!(payment_outcome(&note("expire", "k")), Paid::Failed("expire".into()));
         assert_eq!(amount_of(&note("settlement", "k")), 149_000);
         let c = plans::Catalog::defaults();
-        let pro = snap_order("o", c.get("pro").unwrap(), "a@b.id", "https://x/t", "badi-7");
+        let pro = snap_order("o", c.get("pro").unwrap(), "a@b.id", "https://x/t", "aina-7");
         assert_eq!(pro["transaction_details"]["gross_amount"], 129_000);
         assert_eq!(pro["item_details"][0]["name"], "aina Pro (30 hari, 225 kredit)");
         assert_eq!(item_name(c.get("topup_large").unwrap()), "aina Top-Up Large (300 kredit)");
         // A subscription keeps the card (to renew); a top-up never does.
         assert_eq!(pro["credit_card"]["save_card"], true);
-        assert_eq!(pro["user_id"], "badi-7");
-        let top = snap_order("o", c.get("topup_small").unwrap(), "a@b.id", "https://x/t", "badi-7");
+        assert_eq!(pro["user_id"], "aina-7");
+        let top = snap_order("o", c.get("topup_small").unwrap(), "a@b.id", "https://x/t", "aina-7");
         assert!(top.get("credit_card").is_none() && top.get("user_id").is_none());
         let charge = renewal_charge("r", c.get("pro").unwrap(), "a@b.id", "481111xTOKEN1114");
         assert_eq!(charge["credit_card"]["token_id"], "481111xTOKEN1114");
@@ -392,8 +392,8 @@ mod tests {
 
     #[test]
     fn the_session_cookie_is_read_and_checked() {
-        assert_eq!(cookie(Some("a=1; badi_session=bct_abc; b=2"), SESSION_COOKIE), Some("bct_abc".into()));
-        assert_eq!(cookie(Some("badi_session="), SESSION_COOKIE), None);
+        assert_eq!(cookie(Some("a=1; aina_session=bct_abc; b=2"), SESSION_COOKIE), Some("bct_abc".into()));
+        assert_eq!(cookie(Some("aina_session="), SESSION_COOKIE), None);
         assert_eq!(cookie(None, SESSION_COOKIE), None);
         let c = session_cookie("bct_x");
         assert!(c.contains("HttpOnly") && c.contains("Secure") && c.contains("SameSite=Lax"));
