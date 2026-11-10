@@ -266,7 +266,12 @@ pub fn when(ms: i64) -> String {
 
 // (year, month, day, seconds into the day) in WIB.
 fn civil(ms: i64) -> (i64, i64, i64, i64) {
-    let secs = ms / 1000 + 7 * 3600;
+    civil_at(ms, 7 * 3600)
+}
+
+/// (year, month, day, seconds into the day) at `offset` seconds from UTC.
+pub(crate) fn civil_at(ms: i64, offset: i64) -> (i64, i64, i64, i64) {
+    let secs = ms.div_euclid(1000) + offset;
     let (day, sec) = (secs.div_euclid(86_400), secs.rem_euclid(86_400));
     let z = day + 719_468;
     let era = z.div_euclid(146_097);

@@ -579,4 +579,50 @@ impl Db {
         }
         Ok(())
     }
+
+    // ---------- the daily analytics rollup (badi_cloud_core::stats) ----------
+
+    /// The WIB days from `from` on that were already rolled up (one query).
+    pub async fn rolled_days(&self, from: &str) -> Result<Vec<String>> {
+        #[derive(Deserialize)]
+        struct Row {
+            day: String,
+        }
+        let rows = self.0.prepare("SELECT day FROM daily_stats WHERE day >= ?1 AND metric = ?2").bind(&[s(from), s(badi_cloud_core::stats::ROLLED)])?.all().await?.results::<Row>()?;
+        Ok(rows.into_iter().map(|r| r.day).collect())
+    }
+
+    /// Keeps a day's numbers, in place of any kept before, and marks the day rolled up (at `now`).
+    pub async fn keep_day(&self, day: &str, rows: &[(&str, String, f64)], now: i64) -> Result<()> {
+        let mut batch = vec![self.0.prepare("DELETE FROM daily_stats WHERE day = ?1").bind(&[s(day)])?];
+        for (metric, dim, value) in rows {
+            batch.push(self.0.prepare("INSERT OR REPLACE INTO daily_stats (day, metric, dim, value) VALUES (?1, ?2, ?3, ?4)").bind(&[s(day), s(metric), s(dim), JsValue::from_f64(*value)])?);
+        }
+        batch.push(self.0.prepare("INSERT OR REPLACE INTO daily_stats (day, metric, dim, value) VALUES (?1, ?2, '', ?3)").bind(&[s(day), s(badi_cloud_core::stats::ROLLED), n(now)])?);
+        self.0.batch(batch).await.map(|_| ())
+    }
+
+    /// Forgets that the days from `from` on were rolled up, so the next rollup does them again.
+    pub async fn unroll_since(&self, from: &str) -> Result<()> {
+        self.run("DELETE FROM daily_stats WHERE day >= ?1 AND metric = ?2", &[s(from), s(badi_cloud_core::stats::ROLLED)]).await
+    }
+
+    /// The kept numbers from the day `from` on: { day: { metric: { dim: value } } }.
+    pub async fn stats_since(&self, from: &str) -> Result<serde_json::Value> {
+        #[derive(Deserialize)]
+        struct Row {
+            day: String,
+            metric: String,
+            dim: String,
+            value: f64,
+        }
+        let rows = self.0.prepare("SELECT day, metric, dim, value FROM daily_stats WHERE day >= ?1 AND metric != ?2 ORDER BY day, metric, value DESC").bind(&[s(from), s(badi_cloud_core::stats::ROLLED)])?.all().await?.results::<Row>()?;
+        let mut out = serde_json::Map::new();
+        for r in rows {
+            let day = out.entry(r.day).or_insert_with(|| serde_json::json!({}));
+            let metric = day.as_object_mut().unwrap().entry(r.metric).or_insert_with(|| serde_json::json!({}));
+            metric.as_object_mut().unwrap().insert(r.dim, serde_json::json!(r.value));
+        }
+        Ok(serde_json::Value::Object(out))
+    }
 }

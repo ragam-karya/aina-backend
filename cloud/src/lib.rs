@@ -6,8 +6,9 @@
 // The rules live in badi-cloud-core, shared with native tests; this file is the HTTP and D1 glue.
 
 mod db;
+mod track;
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
 use badi_cloud_core::plans::{Kind, MILLI, Plan, stt_cost, tts_cost};
@@ -20,6 +21,7 @@ use worker::wasm_bindgen::JsValue;
 use worker::*;
 
 use crate::db::Db;
+use crate::track::Outcome;
 
 const TASK_GRACE_MS: i64 = 3_600_000;
 
@@ -283,6 +285,26 @@ async fn admin(mut req: Request, env: &Env, db: &Db, path: &str) -> Result<Respo
     let method = req.method();
     let query = |k: &str| req.url().ok().and_then(|u| u.query_pairs().find(|(n, _)| n == k).map(|(_, v)| v.to_string()));
     match (method, path) {
+        // The kept daily numbers (docs/analytics.md): ?days=30 (at most 400).
+        (Method::Get, "stats") => {
+            let days = query("days").and_then(|d| d.parse::<i64>().ok()).unwrap_or(30).clamp(1, 400);
+            let from = core::stats::wib_day(core::stats::wib_day_start(t) - days * core::stats::DAY_MS);
+            json_res(200, &json!({ "from": from, "days": db.stats_since(&from).await? }))
+        }
+        // Runs the rollup now; ?redo=1 does the past week again (the days Analytics Engine still has).
+        (Method::Post, "stats/roll") => {
+            if secret(env, "CF_ANALYTICS_TOKEN").is_empty() {
+                return error(409, "invalid_request_error", "CF_ANALYTICS_TOKEN is not set (wrangler secret put CF_ANALYTICS_TOKEN).");
+            }
+            if query("redo").as_deref() == Some("1") {
+                let oldest = core::stats::days_to_check(t).last().map(|(d, _)| d.clone()).unwrap_or_default();
+                db.unroll_since(&oldest).await?;
+            }
+            match roll_up(env, db, t).await {
+                Ok(days) => json_res(200, &json!({ "rolled": days })),
+                Err(e) => error(502, "api_error", &e.to_string()),
+            }
+        }
         (Method::Get, "beta") => {
             let credits = db.catalog().await?.of_kind(Kind::Beta).map(|p| p.credits).unwrap_or(0);
             json_res(200, &json!({ "beta": secret(env, "BETA") == "1", "credits": credits, "invites": db.invites().await? }))
@@ -736,9 +758,52 @@ async fn renewals(env: &Env, db: &Db) -> Result<()> {
 #[event(scheduled)]
 async fn scheduled(_event: ScheduledEvent, env: Env, _ctx: ScheduleContext) {
     let Ok(d1) = env.d1("DB") else { return };
-    if let Err(e) = renewals(&env, &Db(d1)).await {
+    let db = Db(d1);
+    if let Err(e) = renewals(&env, &db).await {
         console_log!("[billing] renewals: {e}");
     }
+    match roll_up(&env, &db, now()).await {
+        Ok(days) if !days.is_empty() => console_log!("[stats] rolled up {}", days.join(", ")),
+        Ok(_) => {}
+        Err(e) => console_log!("[stats] rollup: {e}"),
+    }
+}
+
+// ---------- the daily analytics rollup ----------
+
+/// Asks Workers Analytics Engine's SQL API (the binding only writes). Needs CF_ACCOUNT_ID and the secret
+/// CF_ANALYTICS_TOKEN (an API token with Account Analytics: Read).
+async fn analytics_sql(env: &Env, sql: &str) -> Result<Value> {
+    let url = format!("https://api.cloudflare.com/client/v4/accounts/{}/analytics_engine/sql", secret(env, "CF_ACCOUNT_ID"));
+    let mut res = upstream(Method::Post, &url, &[("authorization", format!("Bearer {}", secret(env, "CF_ANALYTICS_TOKEN")))], Some(sql.as_bytes().to_vec())).await?;
+    let status = res.status_code();
+    let text = res.text().await?;
+    if status >= 300 {
+        return Err(Error::RustError(format!("analytics sql {status}: {}", text.chars().take(300).collect::<String>())));
+    }
+    serde_json::from_str(&text).map_err(|e| Error::RustError(format!("analytics sql: {e}")))
+}
+
+/// Keeps yesterday's numbers (and those of any day of the week before that isn't kept yet) in D1's
+/// daily_stats, from Analytics Engine, which keeps only three months. Answers the days it kept. A day
+/// whose queries fail stays undone and is tried on the next run.
+async fn roll_up(env: &Env, db: &Db, t: i64) -> Result<Vec<String>> {
+    if secret(env, "CF_ANALYTICS_TOKEN").is_empty() || secret(env, "CF_ACCOUNT_ID").is_empty() {
+        return Ok(vec![]);
+    }
+    let days = core::stats::days_to_check(t);
+    let done = db.rolled_days(&days.last().map(|(d, _)| d.clone()).unwrap_or_default()).await?;
+    let mut kept = vec![];
+    for (day, start) in days.into_iter().filter(|(d, _)| !done.contains(d)).take(core::stats::DAYS_PER_RUN) {
+        let mut rows = vec![];
+        for (metric, sql) in core::stats::queries(start) {
+            let answer = analytics_sql(env, &sql).await.map_err(|e| Error::RustError(format!("{day} {metric}: {e}")))?;
+            rows.extend(core::stats::rows(&answer).into_iter().map(|(dim, v)| (metric, dim, v)));
+        }
+        db.keep_day(&day, &rows, t).await?;
+        kept.push(day);
+    }
+    Ok(kept)
 }
 
 // ---------- the proxy ----------
@@ -796,22 +861,29 @@ async fn messages(mut req: Request, env: Env, ctx: &Context, db: &Db, a: Account
         let res = upstream(Method::Post, "https://api.anthropic.com/v1/messages/count_tokens", &headers, Some(body)).await?;
         return pass(res, "application/json");
     }
+    let traced = track::Call::new(&req, "messages", &model, a.id);
     if let Err(r) = rules::check_model(&model) {
+        track::refused(&env, &traced, r.status, r.kind);
         return refuse(r);
     }
     let call = match gate(&req, db, &a, true).await? {
         Ok(c) => c,
-        Err(r) => return refuse(r),
+        Err(r) => {
+            track::refused(&env, &traced, r.status, r.kind);
+            return refuse(r);
+        }
     };
     let mut res = match upstream(Method::Post, "https://api.anthropic.com/v1/messages", &headers, Some(body)).await {
         Ok(r) => r,
         Err(e) => {
             end_call(db, &call).await;
+            track::write(&env, &traced, Outcome::error());
             return Err(e);
         }
     };
     if res.status_code() >= 300 {
         end_call(db, &call).await;
+        track::write(&env, &traced, Outcome::upstream(res.status_code(), now() - traced.start));
         return pass(res, "application/json");
     }
     let user = a.id;
@@ -821,6 +893,9 @@ async fn messages(mut req: Request, env: Env, ctx: &Context, db: &Db, a: Account
         if let Ok(Ok(v)) = bytes.as_deref().map(serde_json::from_slice::<Value>) {
             meter.take(&v["usage"]);
         }
+        // Whole replies: the first byte is the whole reply.
+        let took = now() - traced.start;
+        track::write(&env, &traced, Outcome::ok(meter.usage, meter.cost(&model), took, false));
         let spent = db.spend(user, meter.cost(&model), now()).await;
         end_call(db, &call).await;
         spent?;
@@ -831,16 +906,27 @@ async fn messages(mut req: Request, env: Env, ctx: &Context, db: &Db, a: Account
     // Streamed: bill from the usage the stream carried, when it ends or the app hangs up.
     let (tx, rx) = futures_channel::oneshot::channel();
     let booked = Booked { meter: Rc::new(RefCell::new(UsageMeter::default())), done: Some(tx) };
+    // When the first chunk of the reply came (time to first token, near enough).
+    let first = Rc::new(Cell::new(0i64));
+    let first_seen = first.clone();
     let stream = res.stream()?.map(move |chunk| {
         if let Ok(b) = &chunk {
+            if first_seen.get() == 0 {
+                first_seen.set(now());
+            }
             booked.meter.borrow_mut().feed(b);
         }
         chunk
     });
     ctx.wait_until(async move {
+        let meter = rx.await.ok();
+        if let Some(m) = &meter {
+            let first_ms = if first.get() > 0 { first.get() - traced.start } else { 0 };
+            track::write(&env, &traced, Outcome::ok(m.usage, m.cost(&model), first_ms, true));
+        }
         if let Ok(d1) = env.d1("DB") {
             let db = Db(d1);
-            if let Ok(m) = rx.await {
+            if let Some(m) = meter {
                 let _ = db.spend(user, m.cost(&model), now()).await;
             }
             end_call(&db, &call).await;
@@ -853,24 +939,34 @@ async fn messages(mut req: Request, env: Env, ctx: &Context, db: &Db, a: Account
 }
 
 /// A priced upstream call with a slot: booked at `cost` when the upstream takes it, then the slot freed.
-async fn paid_call(db: &Db, a: &Account, call: &str, cost: i64, res: Result<Response>, stream_type: &str) -> Result<Response> {
+/// `traced` and `usage` (characters or bytes sent) go to the call's trace.
+#[allow(clippy::too_many_arguments)]
+async fn paid_call(env: &Env, db: &Db, a: &Account, call: &str, cost: i64, res: Result<Response>, stream_type: &str, traced: &track::Call, usage: u64) -> Result<Response> {
     let res = match res {
         Ok(r) => r,
         Err(e) => {
             end_call(db, call).await;
+            track::write(env, traced, Outcome::error());
             return Err(e);
         }
     };
-    let spent = if res.status_code() < 300 { db.spend(a.id, cost, now()).await } else { Ok(()) };
+    let first_ms = now() - traced.start;
+    let ok = res.status_code() < 300;
+    track::write(env, traced, if ok { Outcome::ok([usage, 0, 0, 0, 0], cost, first_ms, false) } else { Outcome::upstream(res.status_code(), first_ms) });
+    let spent = if ok { db.spend(a.id, cost, now()).await } else { Ok(()) };
     end_call(db, call).await;
     spent?;
     pass(res, stream_type)
 }
 
 async fn transcribe(mut req: Request, env: &Env, db: &Db, a: Account) -> Result<Response> {
+    let traced = track::Call::new(&req, "transcribe", "", a.id);
     let call = match gate(&req, db, &a, true).await? {
         Ok(c) => c,
-        Err(r) => return refuse(r),
+        Err(r) => {
+            track::refused(env, &traced, r.status, r.kind);
+            return refuse(r);
+        }
     };
     let ctype = header(&req, "content-type").unwrap_or_default();
     let body = match req.bytes().await {
@@ -881,45 +977,59 @@ async fn transcribe(mut req: Request, env: &Env, db: &Db, a: Account) -> Result<
         }
     };
     let cost = stt_cost(body.len());
+    let size = body.len() as u64;
     let res = upstream(Method::Post, "https://api.openai.com/v1/audio/transcriptions", &[("authorization", format!("Bearer {}", secret(env, "OPENAI_API_KEY"))), ("content-type", ctype)], Some(body)).await;
-    paid_call(db, &a, &call, cost, res, "application/json").await
+    paid_call(env, db, &a, &call, cost, res, "application/json", &traced, size).await
 }
 
 async fn speech(mut req: Request, env: &Env, db: &Db, a: Account) -> Result<Response> {
     let body = req.bytes().await?;
     let v: Value = serde_json::from_slice(&body).unwrap_or(Value::Null);
+    let traced = track::Call::new(&req, "speech", v["model"].as_str().unwrap_or(""), a.id);
     if let Err(r) = rules::check_tts_model(v["model"].as_str().unwrap_or("")) {
+        track::refused(env, &traced, r.status, r.kind);
         return refuse(r);
     }
     let call = match gate(&req, db, &a, true).await? {
         Ok(c) => c,
-        Err(r) => return refuse(r),
+        Err(r) => {
+            track::refused(env, &traced, r.status, r.kind);
+            return refuse(r);
+        }
     };
-    let cost = tts_cost(v["input"].as_str().unwrap_or("").chars().count(), false);
+    let chars = v["input"].as_str().unwrap_or("").chars().count();
+    let cost = tts_cost(chars, false);
     let res = upstream(Method::Post, "https://api.openai.com/v1/audio/speech", &[("authorization", format!("Bearer {}", secret(env, "OPENAI_API_KEY"))), ("content-type", "application/json".into())], Some(body)).await;
-    paid_call(db, &a, &call, cost, res, "application/octet-stream").await
+    paid_call(env, db, &a, &call, cost, res, "application/octet-stream", &traced, chars as u64).await
 }
 
 async fn eleven(mut req: Request, env: &Env, db: &Db, a: Account, voice: &str) -> Result<Response> {
     let query = req.url()?.query().map(|q| format!("?{q}")).unwrap_or_default();
     let body = req.bytes().await?;
+    let v: Value = serde_json::from_slice(&body).unwrap_or(Value::Null);
+    let traced = track::Call::new(&req, "eleven", v["model_id"].as_str().unwrap_or(""), a.id);
     let call = match gate(&req, db, &a, true).await? {
         Ok(c) => c,
-        Err(r) => return refuse(r),
+        Err(r) => {
+            track::refused(env, &traced, r.status, r.kind);
+            return refuse(r);
+        }
     };
-    let v: Value = serde_json::from_slice(&body).unwrap_or(Value::Null);
-    let cost = tts_cost(v["text"].as_str().unwrap_or("").chars().count(), true);
+    let chars = v["text"].as_str().unwrap_or("").chars().count();
+    let cost = tts_cost(chars, true);
     let voice: String = voice.chars().filter(char::is_ascii_alphanumeric).collect();
     let url = format!("https://api.elevenlabs.io/v1/text-to-speech/{voice}/stream{query}");
     let res = upstream(Method::Post, &url, &[("xi-api-key", secret(env, "ELEVENLABS_API_KEY")), ("content-type", "application/json".into())], Some(body)).await;
-    paid_call(db, &a, &call, cost, res, "application/octet-stream").await
+    paid_call(env, db, &a, &call, cost, res, "application/octet-stream", &traced, chars as u64).await
 }
 
 // Realtime voice: the app's WebRTC audio goes straight to OpenAI, so the cloud mints the one-minute
 // client secret that opens the session (the account must have room left) and bills each reply from the
 // usage the app reports from its response.done events.
 async fn realtime_secret(mut req: Request, env: &Env, db: &Db, a: Account) -> Result<Response> {
+    let traced = track::Call::new(&req, "realtime_session", "", a.id);
     if let Err(r) = gate(&req, db, &a, false).await? {
+        track::refused(env, &traced, r.status, r.kind);
         return refuse(r);
     }
     let body: Value = req.json().await.unwrap_or(Value::Null);
@@ -929,20 +1039,29 @@ async fn realtime_secret(mut req: Request, env: &Env, db: &Db, a: Account) -> Re
     };
     let mut res = upstream(Method::Post, "https://api.openai.com/v1/realtime/client_secrets", &[("authorization", format!("Bearer {}", secret(env, "OPENAI_API_KEY"))), ("content-type", "application/json".into())], Some(out.to_string().into_bytes())).await?;
     let status = res.status_code();
+    let first_ms = now() - traced.start;
     let v: Value = res.json().await.unwrap_or(Value::Null);
     if status >= 300 {
+        track::write(env, &traced, Outcome::upstream(status, first_ms));
         return json_res(status, &v);
     }
+    track::write(env, &traced, Outcome::ok([0; 5], 0, first_ms, false));
     json_res(200, &json!({ "value": v["value"], "expires_at": v["expires_at"] }))
 }
 
-async fn realtime_usage(mut req: Request, db: &Db, a: Account) -> Result<Response> {
+async fn realtime_usage(mut req: Request, env: &Env, db: &Db, a: Account) -> Result<Response> {
+    let mut traced = track::Call::new(&req, "realtime", "", a.id);
     let v: Value = req.json().await.unwrap_or(Value::Null);
     let model = v["model"].as_str().unwrap_or("gpt-realtime");
     if !badi_cloud_core::plans::REALTIME_MODELS.contains(&model) {
         return refuse(rules::not_found());
     }
-    db.spend(a.id, badi_cloud_core::plans::realtime_cost(model, &v["usage"]), now()).await?;
+    let cost = badi_cloud_core::plans::realtime_cost(model, &v["usage"]);
+    // The reply happened in the app's own session with OpenAI: no latency here, only what it used.
+    traced.model = model.to_string();
+    let n = |k: &str| v["usage"][k].as_u64().unwrap_or(0);
+    track::write(env, &traced, Outcome::ok([n("input_tokens"), n("output_tokens"), 0, 0, 0], cost, 0, false));
+    db.spend(a.id, cost, now()).await?;
     json_res(200, &json!({ "ok": true }))
 }
 
@@ -1133,7 +1252,7 @@ async fn fetch(req: Request, env: Env, ctx: Context) -> Result<Response> {
         (Method::Post, "/v1/audio/transcriptions") => transcribe(req, &env, &db, a).await,
         (Method::Post, "/v1/audio/speech") => speech(req, &env, &db, a).await,
         (Method::Post, "/v1/realtime/client_secrets") => realtime_secret(req, &env, &db, a).await,
-        (Method::Post, "/v1/realtime/usage") => realtime_usage(req, &db, a).await,
+        (Method::Post, "/v1/realtime/usage") => realtime_usage(req, &env, &db, a).await,
         (Method::Post, p) if p.starts_with("/eleven/v1/text-to-speech/") && p.ends_with("/stream") => {
             let voice = p.trim_start_matches("/eleven/v1/text-to-speech/").trim_end_matches("/stream").to_string();
             eleven(req, &env, &db, a, &voice).await
