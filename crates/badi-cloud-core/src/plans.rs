@@ -1,4 +1,4 @@
-// The price list and credits. Badi Cloud sells credits: a free starter once per PC, monthly
+// The price list and credits. aina Cloud sells credits: a free starter once per PC, monthly
 // subscriptions (Basic, Pro; the cheapest credits, which lapse at the end of each 30-day cycle), top-up
 // packs whose credits never lapse, and Enterprise by contact. Every plan lives in the `plans` table, so
 // prices and quotas change there without a release; `Catalog::defaults` is the starting price list
@@ -197,7 +197,7 @@ pub fn whole(milli: i64) -> i64 {
     milli.max(0) / MILLI
 }
 
-/// Sonnet, Haiku and Opus: the Claude models Badi Cloud pays for (every plan; Opus simply costs more
+/// Sonnet, Haiku and Opus: the Claude models aina Cloud pays for (every plan; Opus simply costs more
 /// credits).
 pub fn model_allowed(model: &str) -> bool {
     ["claude-sonnet-5-5", "claude-haiku-5-5", "claude-opus-5-5", "claude-opus-5"].iter().any(|m| model.starts_with(m))
@@ -231,7 +231,7 @@ pub fn tts_cost(chars: usize, elevenlabs: bool) -> Cost {
     (chars as f64 * if elevenlabs { 1.33 } else { 0.47 } * 1000.0).round() as Cost
 }
 
-/// The realtime voice models Badi Cloud pays for.
+/// The realtime voice models aina Cloud pays for.
 pub const REALTIME_MODELS: [&str; 2] = ["gpt-realtime", "gpt-realtime-mini"];
 
 /// One realtime reply from the usage in its `response.done` event: text, audio and images in (cached

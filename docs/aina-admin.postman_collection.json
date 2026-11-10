@@ -1,7 +1,7 @@
 {
   "info": {
-    "name": "Badi Cloud Admin",
-    "description": "Daftar paket (tabel plans), tarif kredit, undangan beta, dan kredit. Contoh di sini memakai alamat sales@badi.id sebagai contoh saja; ganti dengan kontak sungguhan. Isi variabel koleksi adminToken (= secret ADMIN_TOKEN di Worker). Semua request memakai Authorization: Bearer {{adminToken}}.",
+    "name": "aina Cloud Admin",
+    "description": "Daftar paket (tabel plans), tarif kredit, undangan beta, dan kredit. Contoh di sini memakai alamat sales@aina.ai.id sebagai contoh saja; ganti dengan kontak sungguhan. Isi variabel koleksi adminToken (= secret ADMIN_TOKEN di Worker). Semua request memakai Authorization: Bearer {{adminToken}}.",
     "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
   },
   "auth": {
@@ -71,7 +71,7 @@
         "method": "POST",
         "url": "{{baseUrl}}/admin/composio",
         "header": [{ "key": "Content-Type", "value": "application/json" }],
-        "body": { "mode": "raw", "raw": "{\n  \"provider\": \"google\",\n  \"clientId\": \"\",\n  \"clientSecret\": \"\",\n  \"viaBadi\": false\n}" }
+        "body": { "mode": "raw", "raw": "{\n  \"provider\": \"google\",\n  \"clientId\": \"\",\n  \"clientSecret\": \"\",\n  \"viaAina\": false\n}" }
       }
     },
     {
@@ -84,7 +84,7 @@
         "method": "PUT",
         "url": "{{baseUrl}}/admin/settings",
         "header": [{ "key": "Content-Type", "value": "application/json" }],
-        "body": { "mode": "raw", "raw": "{\n  \"rupiahPerCredit\": 170,\n  \"enterpriseContact\": \"mailto:sales@badi.id\"\n}" }
+        "body": { "mode": "raw", "raw": "{\n  \"rupiahPerCredit\": 170,\n  \"enterpriseContact\": \"mailto:sales@aina.ai.id\"\n}" }
       }
     }
   ]

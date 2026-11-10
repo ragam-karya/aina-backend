@@ -1,4 +1,4 @@
-// D1 queries for Badi Cloud: the price list (plans, billing_settings), accounts and their credits,
+// D1 queries for aina Cloud: the price list (plans, billing_settings), accounts and their credits,
 // Google sign-ins under way, login hand-offs, device tokens, the free starter per PC, tasks allowed to
 // finish, payments and Composio session ownership. Only what accounts and billing need.
 

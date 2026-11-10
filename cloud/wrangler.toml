@@ -1,17 +1,15 @@
-# Badi Cloud on Cloudflare Workers (Rust → WebAssembly with worker-build).
+# aina Cloud on Cloudflare Workers (Rust → WebAssembly with worker-build).
 name = "badi-cloud"
 main = "build/worker/shim.mjs"
 compatibility_date = "2026-10-01"
 
-# Two hostnames, one Worker: be.aina.ai.id (the new address) and badi-cloud.<account>.workers.dev,
-# which installed apps still call. Keep workers_dev on until that traffic is gone
-# (docs/plan-custom-domain-be.md, BE-18).
-workers_dev = true
+# One address: be.aina.ai.id. The workers.dev hostname is off (the website reaches this Worker through
+# its service binding, not over workers.dev).
+workers_dev = false
 preview_urls = true
 routes = [{ pattern = "be.aina.ai.id", custom_domain = true }]
 
-# Workers Logs: each request's URL (so its hostname) is kept, to watch the old address empty out.
-# Sampled to stay well inside the free log quota; enough to compare hostnames.
+# Workers Logs, sampled to stay well inside the free log quota.
 [observability]
 enabled = true
 head_sampling_rate = 0.1
@@ -21,16 +19,15 @@ command = "cargo install -q worker-build && worker-build --release"
 
 [vars]
 PUBLIC_URL = "https://be.aina.ai.id"
-# This Worker's other addresses, comma-separated: accepted as our own origin for cookie calls.
-# The workers.dev address stays here until installed apps have moved off it (BE-18).
-ALT_PUBLIC_URLS = "https://badi-cloud.faisalmashuri16.workers.dev"
+# This Worker's other addresses, comma-separated: accepted as our own origin for cookie calls. None.
+ALT_PUBLIC_URLS = ""
 # BE-17, off while empty: the message the app's calls on an ALT_PUBLIC_URLS address get instead of an
 # answer (HTTP 426), once old installs should update, e.g.
 # "Versi aina ini sudah tidak didukung. Unduh versi terbaru di https://aina.ai.id/api/download".
 RETIRED_HOST_MESSAGE = ""
 # Base of the Composio OAuth redirect proxy (/api/composio-redirect) for auth configs registered with
-# viaBadi. Pinned so it never follows PUBLIC_URL by accident; whatever is set here must also be an
-# Authorized redirect URI in the provider's OAuth app. (2026-11-09: no auth config uses viaBadi.)
+# viaAina. Pinned so it never follows PUBLIC_URL by accident; whatever is set here must also be an
+# Authorized redirect URI in the provider's OAuth app. (2026-11-09: no auth config uses viaAina.)
 COMPOSIO_REDIRECT_BASE = "https://be.aina.ai.id"
 # The website with the sign-in, plans and thanks pages; it reaches this Worker through its /api proxy
 # (a service binding), so the session cookie lives on its domain.
@@ -40,7 +37,7 @@ MIDTRANS_PRODUCTION = "1"
 # The closed beta: "1" lets in only the emails on the invite list (admin API), each with the beta credit.
 # "0" (production): any Google account signs in on Free.
 BETA = "0"
-# Accounts that use Badi without limits (never charged, buy nothing), comma-separated. Applied at sign-in.
+# Accounts that use aina without limits (never charged, buy nothing), comma-separated. Applied at sign-in.
 UNLIMITED_EMAILS = "faisalmashuri16@gmail.com"
 
 # The Windows installer for /download (object windows/latest; uploaded per release, see README).

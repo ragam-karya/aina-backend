@@ -1,4 +1,4 @@
-// Badi Cloud on Cloudflare Workers. People sign in with Google and get the free starter credits once per
+// aina Cloud on Cloudflare Workers. People sign in with Google and get the free starter credits once per
 // PC; they buy monthly subscriptions or top-up packs (Midtrans), from the price list in the `plans`
 // table. The Worker holds the Anthropic, OpenAI, ElevenLabs and Composio keys and proxies the app's
 // calls per account, booking each call's real cost as credits (after a streamed reply ends, even when
@@ -203,13 +203,13 @@ async fn google_callback(req: &Request, env: &Env, db: &Db) -> Result<Response> 
     };
     // The closed beta (BETA = "1"): only invited emails get in, and they get the beta credit.
     let beta = secret(env, "BETA") == "1";
-    // UNLIMITED_EMAILS (comma-separated): accounts that use Badi without limits, e.g. the owner's.
+    // UNLIMITED_EMAILS (comma-separated): accounts that use aina without limits, e.g. the owner's.
     let unlimited = secret(env, "UNLIMITED_EMAILS").split(',').any(|e| e.trim().eq_ignore_ascii_case(&email));
     if beta && !unlimited && !db.invited(&email.to_lowercase()).await? {
         return problem(&format!("aina masih beta tertutup, dan {email} belum ada di daftar undangan. Minta undangan ke tim aina, lalu masuk lagi."), 403);
     }
     // Composio links belong to this id; it says nothing about the person.
-    let (account, _) = db.find_or_create(&email, name.as_deref(), t, &format!("badi_{}", core::random_hex(12)), beta, unlimited).await?;
+    let (account, _) = db.find_or_create(&email, name.as_deref(), t, &format!("aina_{}", core::random_hex(12)), beta, unlimited).await?;
     let code = core::random_hex(24);
     db.put_grant(&core::sha256(&code), account.id, &kept, t + core::GRANT_TTL_MS, t).await?;
     // The browser: on to the website, which trades the code for its session cookie. The free starter
@@ -271,7 +271,7 @@ async fn exchange(mut req: Request, db: &Db) -> Result<Response> {
     json_res(200, &json!({ "token": token, "freeCredits": free, "account": account.view(&catalog, t) }))
 }
 
-// ---------- admin: the price list, the beta invite list and credits (Postman: docs/badi-admin.postman_collection.json) ----------
+// ---------- admin: the price list, the beta invite list and credits (Postman: docs/aina-admin.postman_collection.json) ----------
 // Every call needs `Authorization: Bearer <ADMIN_TOKEN>`; with ADMIN_TOKEN unset (or short) the API
 // does not exist. Answers carry no prompts or usage details, only plans, invites and credits left.
 
@@ -386,20 +386,20 @@ async fn admin(mut req: Request, env: &Env, db: &Db, path: &str) -> Result<Respo
             v["active"] = json!(p.active);
             json_res(200, &v)
         }
-        // Sign-in as B.A.D.I. (instead of Composio): which providers have B.A.D.I.'s OAuth app, and the
-        // redirect URI to give each provider's console.
+        // Sign-in as aina (instead of Composio): which providers have aina's OAuth app, and the redirect
+        // URI to give each provider's console.
         (Method::Get, "composio") => {
             let ac = auth_configs(env, db).await?;
-            let providers: Vec<Value> = rules::COMPOSIO_PROVIDERS.iter().map(|(p, slugs)| json!({ "provider": p, "apps": slugs, "badi": slugs.iter().all(|s| ac[*s].is_string()) })).collect();
-            json_res(200, &json!({ "redirectUris": { "composio": rules::COMPOSIO_CALLBACK, "viaBadi": proxy_uri(env) }, "providers": providers, "authConfigs": ac }))
+            let providers: Vec<Value> = rules::COMPOSIO_PROVIDERS.iter().map(|(p, slugs)| json!({ "provider": p, "apps": slugs, "aina": slugs.iter().all(|s| ac[*s].is_string()) })).collect();
+            json_res(200, &json!({ "redirectUris": { "composio": rules::COMPOSIO_CALLBACK, "viaAina": proxy_uri(env) }, "providers": providers, "authConfigs": ac }))
         }
-        // { "provider": "google", "clientId": "…", "clientSecret": "…", "viaBadi": false }: registers
-        // B.A.D.I.'s OAuth app at Composio for every app of the provider (all or none). viaBadi: the
-        // provider returns to Badi Cloud's redirect proxy (that URI must be in the OAuth app) instead of
+        // { "provider": "google", "clientId": "…", "clientSecret": "…", "viaAina": false }: registers
+        // aina's OAuth app at Composio for every app of the provider (all or none). viaAina: the provider returns to aina Cloud's redirect proxy (that URI
+        // must be in the OAuth app) instead of
         // Composio's callback. Accounts linked before keep their old sign-in until they are relinked.
         (Method::Post, "composio") => {
             let b: Value = req.json().await.unwrap_or(Value::Null);
-            let via = (b["viaBadi"] == true).then(|| proxy_uri(env));
+            let via = (b["viaAina"] == true).then(|| proxy_uri(env));
             let provider = b["provider"].as_str().unwrap_or("");
             let Some(slugs) = rules::provider_slugs(provider) else { return error(400, "invalid_request_error", "provider is one of google, microsoft, slack, github, notion, linear, jira, clickup, hubspot, salesforce, dropbox.") };
             let (id, secret_) = (b["clientId"].as_str().unwrap_or("").trim(), b["clientSecret"].as_str().unwrap_or("").trim());
@@ -491,10 +491,10 @@ async fn start_checkout(env: &Env, db: &Db, a: &Account, item: &str) -> Result<s
     if key.is_empty() {
         return Ok(Err(rules::refusal(503, "api_error", "Pembayaran belum disiapkan di server.")));
     }
-    let order = format!("badi-{}-{t}-{}", a.id, core::random_hex(3));
+    let order = format!("aina-{}-{t}-{}", a.id, core::random_hex(3));
     db.add_payment(&order, a.id, &p.id, p.price, "checkout", t).await?;
     let finish = format!("{}/terima-kasih", frontend_url(env));
-    let body = core::snap_order(&order, p, &a.email, &finish, &format!("badi-{}", a.id));
+    let body = core::snap_order(&order, p, &a.email, &finish, &format!("aina-{}", a.id));
     let mut res = upstream(Method::Post, core::snap_url(midtrans_production(env)), &midtrans_headers(&key), Some(body.to_string().into_bytes())).await?;
     let v: Value = res.json().await.unwrap_or(Value::Null);
     Ok(match v["redirect_url"].as_str() {
@@ -711,7 +711,7 @@ async fn renewals(env: &Env, db: &Db) -> Result<()> {
             continue;
         }
         let (Some(p), Some(token)) = (catalog.get(&a.plan), db.renewal_token(a.id).await?) else { continue };
-        let order = format!("badi-{}-r{t}-{}", a.id, core::random_hex(3));
+        let order = format!("aina-{}-r{t}-{}", a.id, core::random_hex(3));
         db.add_payment(&order, a.id, &p.id, p.price, "renewal", t).await?;
         let body = core::renewal_charge(&order, p, &a.email, &token);
         let v: Value = match upstream(Method::Post, &format!("{api}/v2/charge"), &midtrans_headers(&key), Some(body.to_string().into_bytes())).await {
@@ -749,7 +749,7 @@ async fn scheduled(_event: ScheduledEvent, env: Env, _ctx: ScheduleContext) {
 /// the slot's id, for Db::end_call when the call is booked ("" without one).
 async fn gate(req: &Request, db: &Db, a: &Account, slot: bool) -> Result<std::result::Result<String, Refusal>> {
     let t = now();
-    let task = header(req, "x-badi-task").filter(|id| rules::valid_task(id));
+    let task = header(req, "x-aina-task").filter(|id| rules::valid_task(id));
     let continuing = match &task {
         Some(id) => db.task_continues(a.id, id, t).await?,
         None => false,
@@ -957,7 +957,7 @@ async fn composio_call(env: &Env, method: Method, path: &str, query: &str, body:
     Ok((status, res.json().await.unwrap_or(Value::Null)))
 }
 
-/// Badi Cloud's OAuth redirect proxy, for the providers' consoles.
+/// aina Cloud's OAuth redirect proxy, for the providers' consoles.
 /// Its base is COMPOSIO_REDIRECT_BASE when set, else PUBLIC_URL: the URI is kept by Composio and the
 /// providers' consoles, so it must not move just because the Worker's address does.
 fn proxy_uri(env: &Env) -> String {
@@ -965,7 +965,7 @@ fn proxy_uri(env: &Env) -> String {
     format!("{}{}", base.trim_end_matches('/'), rules::REDIRECT_PROXY_PATH)
 }
 
-/// Sign-in as B.A.D.I.: { app slug: "ac_…" }, from the admin API (D1), over the older
+/// Sign-in as aina: { app slug: "ac_…" }, from the admin API (D1), over the older
 /// COMPOSIO_AUTH_CONFIGS secret.
 async fn auth_configs(env: &Env, db: &Db) -> Result<Value> {
     let mut all: Value = serde_json::from_str(&secret(env, "COMPOSIO_AUTH_CONFIGS")).unwrap_or(json!({}));
