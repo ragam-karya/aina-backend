@@ -309,12 +309,12 @@ mod tests {
     #[test]
     fn the_public_list_groups_plans_and_hides_notes() {
         let mut c = Catalog::defaults();
-        c.enterprise_contact = "mailto:sales@badi.id".into();
+        c.enterprise_contact = "mailto:sales@aina.ai.id".into();
         let v = c.public();
         let ids = |k: &str| v[k].as_array().unwrap().iter().map(|p| p["id"].as_str().unwrap().to_string()).collect::<Vec<_>>();
         assert_eq!(ids("subscriptions"), ["basic", "pro"]);
         assert_eq!(ids("topups"), ["topup_small", "topup_medium", "topup_large"]);
-        assert_eq!(v["enterprise"]["contact"], "mailto:sales@badi.id");
+        assert_eq!(v["enterprise"]["contact"], "mailto:sales@aina.ai.id");
         assert_eq!(v["free"]["credits"], 10);
         assert!(!v.to_string().contains("Decoy"), "internal notes stay internal");
         assert!(!v.to_string().contains("\"beta\""), "an inactive plan is not offered");
