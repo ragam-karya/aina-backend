@@ -41,7 +41,18 @@ page = '''<!doctype html>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/js-yaml/4.1.0/js-yaml.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/swagger-ui/5.17.14/swagger-ui-bundle.min.js"></script>
 <script>
-  const specs = [...document.querySelectorAll('script.spec')].map((s) => ({ name: s.dataset.name, spec: jsyaml.load(s.textContent) }));
+  // A spec that doesn't parse says so on the page instead of leaving it blank.
+  const specs = [];
+  for (const s of document.querySelectorAll('script.spec')) {
+    try {
+      specs.push({ name: s.dataset.name, spec: jsyaml.load(s.textContent) });
+    } catch (e) {
+      const p = document.createElement('pre');
+      p.style.cssText = 'margin:16px;padding:12px;background:#fee;color:#900;white-space:pre-wrap';
+      p.textContent = s.dataset.name + '-openapi.yaml tidak bisa dibaca:\\n' + e.message;
+      document.body.append(p);
+    }
+  }
   const pick = document.getElementById('pick');
   for (const s of specs) pick.append(new Option(s.spec.info.title, s.name));
   const show = (name) => SwaggerUIBundle({ spec: specs.find((s) => s.name === name).spec, dom_id: '#ui', deepLinking: true, docExpansion: 'list', defaultModelsExpandDepth: 0, tryItOutEnabled: false });
