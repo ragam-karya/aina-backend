@@ -377,8 +377,19 @@ async fn leaderboard_join(mut req: Request, env: &Env, a: &Account) -> Result<Re
 // does not exist. Answers carry no prompts or usage details, only plans, invites and credits left.
 
 async fn admin(mut req: Request, env: &Env, db: &Db, path: &str) -> Result<Response> {
-    if !core::admin_ok(header(&req, "authorization").as_deref(), &secret(env, "ADMIN_TOKEN")) {
-        return refuse(rules::not_found());
+    let token = secret(env, "ADMIN_TOKEN");
+    let auth = header(&req, "authorization");
+    // The usage reports only read: they also open with the simpler USAGE_BASIC_AUTH (wrangler.toml).
+    let usage_read = req.method() == Method::Get && (path == "usage" || path.starts_with("usage/"));
+    let ok = core::admin_ok(auth.as_deref(), &token) || (usage_read && core::basic_ok(auth.as_deref(), &secret(env, "USAGE_BASIC_AUTH")));
+    if token.len() < 24 && !ok {
+        return refuse(rules::not_found()); // no ADMIN_TOKEN: no admin API
+    }
+    if !ok {
+        // Asks for the user name and password (Basic auth: admin + ADMIN_TOKEN); a Bearer token works too.
+        let mut res = error(401, "authentication_error", "Masuk dulu (Basic auth).")?;
+        res.headers_mut().set("www-authenticate", "Basic realm=\"aina admin\", charset=\"UTF-8\"")?;
+        return Ok(res);
     }
     let t = now();
     let method = req.method();

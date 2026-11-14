@@ -15,7 +15,9 @@ info:
 
     **Auth**
     - Endpoint `/v1/*`: token akun app (`bct_…`) di `Authorization: Bearer`.
-    - Endpoint `/admin/*`: `ADMIN_TOKEN` di `Authorization: Bearer`. Token salah → `404`.
+    - Endpoint `/admin/usage/*`: **Basic auth** `admin` / `admin` (klik **Authorize** → `adminBasic`).
+      Diatur di `USAGE_BASIC_AUTH` (wrangler.toml). `Authorization: Bearer <ADMIN_TOKEN>` juga diterima.
+      Tanpa login → `401`.
 servers:
   - url: https://be.aina.ai.id
     description: Production
@@ -25,7 +27,8 @@ tags:
   - name: Leaderboard
     description: Untuk app. Hanya user yang memilih ikut yang tampil, dengan nama yang mereka setujui.
   - name: Admin usage
-    description: Laporan bisnis. Butuh `ADMIN_TOKEN`.
+    description: "Laporan bisnis (hanya baca). Basic auth: `admin` / `admin`."
+
 
 paths:
   /v1/leaderboard:
@@ -112,7 +115,7 @@ paths:
       description: |
         Jawaban "boncos atau tidak" (`margin.loss`) dan bahan perbandingan model/provider
         (`byModel`: token, HPP, `tokensPerCredit`, `failRate`, `avgMs`). `/admin/usage` sama dengan ini.
-      security: [{ adminToken: [] }]
+      security: [{ adminBasic: [] }, { adminToken: [] }]
       parameters:
         - $ref: "#/components/parameters/From"
         - $ref: "#/components/parameters/To"
@@ -213,7 +216,7 @@ paths:
                     tokensPerCredit: 1076
                     failRate: 0
                     avgMs: 29
-        "404": { $ref: "#/components/responses/AdminNotFound" }
+        "401": { $ref: "#/components/responses/AdminNotFound" }
         "409": { $ref: "#/components/responses/NoUsageDb" }
 
   /admin/usage/daily:
@@ -221,7 +224,7 @@ paths:
       tags: [Admin usage]
       summary: Deret harian (untuk grafik)
       description: Per hari WIB, urut tanggal. Berapa user aktif, berapa kali aina membantu, token, HPP, kredit.
-      security: [{ adminToken: [] }]
+      security: [{ adminBasic: [] }, { adminToken: [] }]
       parameters:
         - $ref: "#/components/parameters/From"
         - $ref: "#/components/parameters/To"
@@ -249,7 +252,7 @@ paths:
                 days:
                   - { day: "2026-11-13", users: 12, helps: 87, calls_ok: 240, calls_failed: 3, tokens: 1520000, costIdr: 18450.5, credits: 108.53, tokensPerCredit: 14005, failRate: 0.0124, avgMs: 2210 }
                   - { day: "2026-11-14", users: 2, helps: 4, calls_ok: 4, calls_failed: 2, tokens: 8400, costIdr: 1326.24, credits: 7.804, tokensPerCredit: 1076, failRate: 0.3333, avgMs: 29 }
-        "404": { $ref: "#/components/responses/AdminNotFound" }
+        "401": { $ref: "#/components/responses/AdminNotFound" }
         "409": { $ref: "#/components/responses/NoUsageDb" }
 
   /admin/usage/users:
@@ -259,7 +262,7 @@ paths:
       description: |
         Token, HPP, kredit per user, dengan email/paket dari `badi-cloud` dan pendapatan (pembayaran `paid`
         di rentang itu). `margin.loss = true` berarti biaya API user itu lebih besar dari yang ia bayar.
-      security: [{ adminToken: [] }]
+      security: [{ adminBasic: [] }, { adminToken: [] }]
       parameters:
         - $ref: "#/components/parameters/From"
         - $ref: "#/components/parameters/To"
@@ -320,14 +323,14 @@ paths:
                     idrPerCredit: 169.94
                     tokensPerCredit: 1076
                     margin: { revenueIdr: 0, costIdr: 331.56, grossProfitIdr: -331.56, grossMargin: null, loss: true }
-        "404": { $ref: "#/components/responses/AdminNotFound" }
+        "401": { $ref: "#/components/responses/AdminNotFound" }
         "409": { $ref: "#/components/responses/NoUsageDb" }
 
   /admin/usage/user:
     get:
       tags: [Admin usage]
       summary: Satu user, per hari per model
-      security: [{ adminToken: [] }]
+      security: [{ adminBasic: [] }, { adminToken: [] }]
       parameters:
         - name: email
           in: query
@@ -369,8 +372,9 @@ paths:
                 days:
                   - { day: "2026-11-14", provider: openai, model: gpt-realtime-mini, route: realtime, calls_ok: 3, calls_failed: 0, helps: 3, tokens: 6300, costIdr: 994.68, credits: 5.853, tokensPerCredit: 1076, failRate: 0, avgMs: 31 }
                   - { day: "2026-11-14", provider: anthropic, model: claude-haiku-5-5, route: messages, calls_ok: 0, calls_failed: 1, helps: 0, tokens: 0, costIdr: 0, credits: 0, tokensPerCredit: null, failRate: 1, avgMs: null }
+        "401": { $ref: "#/components/responses/AdminNotFound" }
         "404":
-          description: Email tidak ditemukan, atau ADMIN_TOKEN salah.
+          description: Email tidak ditemukan.
         "409": { $ref: "#/components/responses/NoUsageDb" }
 
   /admin/usage/features:
@@ -378,7 +382,7 @@ paths:
       tags: [Admin usage]
       summary: Per fitur app (x-aina-kind)
       description: Fitur mana yang paling sering dipakai dan paling mahal (`tanya`, `agent`, `dikte`, …; kosong = app lama tanpa header).
-      security: [{ adminToken: [] }]
+      security: [{ adminBasic: [] }, { adminToken: [] }]
       parameters:
         - $ref: "#/components/parameters/From"
         - $ref: "#/components/parameters/To"
@@ -394,7 +398,7 @@ paths:
                 features:
                   - { feature: tanya, users: 2, helps: 4, calls_ok: 4, calls_failed: 0, tokens: 8400, costIdr: 1326.24, credits: 7.804 }
                   - { feature: agent, users: 0, helps: 0, calls_ok: 0, calls_failed: 1, tokens: 0, costIdr: 0, credits: 0 }
-        "404": { $ref: "#/components/responses/AdminNotFound" }
+        "401": { $ref: "#/components/responses/AdminNotFound" }
         "409": { $ref: "#/components/responses/NoUsageDb" }
 
   /admin/usage/hours:
@@ -402,7 +406,7 @@ paths:
       tags: [Admin usage]
       summary: Jam pemakaian (WIB)
       description: Panggilan sukses per jam 0-23 WIB. Hanya mencakup 180 hari terakhir (umur `ai_calls`).
-      security: [{ adminToken: [] }]
+      security: [{ adminBasic: [] }, { adminToken: [] }]
       parameters:
         - $ref: "#/components/parameters/From"
         - $ref: "#/components/parameters/To"
@@ -418,7 +422,7 @@ paths:
                 hours:
                   - { hour: 9, calls: 120, users: 8 }
                   - { hour: 14, calls: 4, users: 2 }
-        "404": { $ref: "#/components/responses/AdminNotFound" }
+        "401": { $ref: "#/components/responses/AdminNotFound" }
         "409": { $ref: "#/components/responses/NoUsageDb" }
 
 components:
@@ -427,10 +431,14 @@ components:
       type: http
       scheme: bearer
       description: Token akun dari app (`bct_…`).
+    adminBasic:
+      type: http
+      scheme: basic
+      description: "User `admin`, password `admin` (USAGE_BASIC_AUTH di wrangler.toml)."
     adminToken:
       type: http
       scheme: bearer
-      description: "`ADMIN_TOKEN` (secret Worker, minimal 24 karakter)."
+      description: "Alternatif: `ADMIN_TOKEN` sebagai Bearer token."
 
   parameters:
     From:
@@ -456,7 +464,10 @@ components:
         application/json:
           schema: { $ref: "#/components/schemas/Error" }
     AdminNotFound:
-      description: ADMIN_TOKEN salah atau tidak ada (API admin tidak menampakkan diri).
+      description: Belum login (`admin` / `admin`) atau password salah. Jawabannya 401 dengan `WWW-Authenticate: Basic`.
+      content:
+        application/json:
+          example: { type: error, error: { type: authentication_error, message: "Masuk dulu (Basic auth)." } }
     NoUsageDb:
       description: Worker belum punya binding `USAGE`.
       content:

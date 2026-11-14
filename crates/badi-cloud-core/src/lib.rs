@@ -53,8 +53,32 @@ pub fn clean_email(s: &str) -> Option<String> {
 
 /// The admin API key in `Authorization: Bearer …` matches ADMIN_TOKEN (never when that is unset).
 pub fn admin_ok(header: Option<&str>, token: &str) -> bool {
-    let given = header.and_then(|h| h.strip_prefix("Bearer ")).unwrap_or("").trim();
-    token.len() >= 24 && same(given, token)
+    use base64::Engine;
+    let header = header.unwrap_or("").trim();
+    let given = if let Some(b) = header.strip_prefix("Bearer ") {
+        b.trim().to_string()
+    } else if let Some(basic) = header.strip_prefix("Basic ") {
+        // Basic auth (a browser's sign-in box, Swagger at /docs): user ADMIN_USER, password ADMIN_TOKEN.
+        let pair = base64::engine::general_purpose::STANDARD.decode(basic.trim()).ok().and_then(|b| String::from_utf8(b).ok()).unwrap_or_default();
+        match pair.split_once(':') {
+            Some((user, pass)) if same(user, ADMIN_USER) => pass.to_string(),
+            _ => String::new(),
+        }
+    } else {
+        String::new()
+    };
+    token.len() >= 24 && same(&given, token)
+}
+
+/// The user name for the admin API's Basic auth (the password is ADMIN_TOKEN).
+pub const ADMIN_USER: &str = "admin";
+
+/// Basic auth against `pair` ("user:password", the USAGE_BASIC_AUTH variable). An empty pair lets no one in.
+pub fn basic_ok(header: Option<&str>, pair: &str) -> bool {
+    use base64::Engine;
+    let Some(given) = header.unwrap_or("").trim().strip_prefix("Basic ") else { return false };
+    let given = base64::engine::general_purpose::STANDARD.decode(given.trim()).ok().and_then(|b| String::from_utf8(b).ok()).unwrap_or_default();
+    pair.contains(':') && same(&given, pair)
 }
 
 /// The app's state: 32 to 128 letters and digits (the app makes 64 hex characters).
@@ -322,6 +346,20 @@ mod tests {
         assert!(!admin_ok(Some("Bearer nope"), &key));
         assert!(!admin_ok(None, &key));
         assert!(!admin_ok(Some("Bearer short"), "short"), "a short ADMIN_TOKEN turns the API off");
+        // Basic auth: admin + ADMIN_TOKEN.
+        let basic = |u: &str, p: &str| {
+            use base64::Engine;
+            format!("Basic {}", base64::engine::general_purpose::STANDARD.encode(format!("{u}:{p}")))
+        };
+        assert!(admin_ok(Some(&basic("admin", &key)), &key));
+        assert!(!admin_ok(Some(&basic("root", &key)), &key));
+        assert!(!admin_ok(Some(&basic("admin", "nope")), &key));
+        assert!(!admin_ok(Some("Basic !!!"), &key));
+        assert!(basic_ok(Some(&basic("admin", "admin")), "admin:admin"));
+        assert!(!basic_ok(Some(&basic("admin", "salah")), "admin:admin"));
+        assert!(!basic_ok(Some(&basic("admin", "admin")), ""), "no USAGE_BASIC_AUTH: closed");
+        assert!(!basic_ok(Some(&format!("Bearer {key}")), "admin:admin"));
+        assert!(!basic_ok(None, "admin:admin"));
     }
 
     fn note(status: &str, key: &str) -> Value {
