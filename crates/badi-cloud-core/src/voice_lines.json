@@ -1,0 +1,41 @@
+{
+  "_": "aina's fixed spoken lines. KEEP IDENTICAL in aina-notch (crates/aina-llm/src/voice_lines.json) and aina-backend (crates/badi-cloud-core/src/voice_lines.json): the app asks for a line by id (\"greet.pagi.0\") and the cloud speaks this text for free. {n} is \", <name>\" or nothing; {wake} is the wake-word hint or nothing.",
+  "wake": {
+    "id": ", panggil aja \"Hey aina\"",
+    "en": ", just say \"Hey aina\""
+  },
+  "id": {
+    "greet.first": ["Hai{n}, aku aina. Aku di sini kalau kamu butuh{wake}."],
+    "greet.early": ["Hai lagi{n}! Aku di sini kalau kamu butuh.", "Halo{n}, aku standby ya."],
+    "greet.again": ["Aku di sini lagi.", "Hai lagi{n}.", "Siap kalau kamu butuh."],
+    "greet.away": ["Hai{n}, lama nggak ketemu. Aku di sini kalau perlu.", "Eh, kamu balik{n}! Aku standby ya."],
+    "greet.pagi": ["Pagi{n}! Aku siap kalau kamu butuh.", "Selamat pagi{n}. Aku standby ya.", "Pagi{n}. Semoga harinya lancar."],
+    "greet.siang": ["Siang{n}! Aku standby.", "Hai{n}, aku di sini kalau perlu bantuan.", "Siang{n}. Panggil aja kalau butuh."],
+    "greet.sore": ["Sore{n}! Aku di sini kalau perlu.", "Hai{n}, sore ini aku standby ya.", "Sore{n}. Panggil aja kalau butuh."],
+    "greet.malam": ["Malam{n}. Aku di sini kalau butuh.", "Hai{n}, aku standby ya.", "Malam{n}! Panggil aja kalau perlu."],
+    "greet.larut": ["Masih melek{n}? Aku standby kok.", "Udah larut nih{n}. Aku di sini kalau perlu.", "Hai{n}, aku masih standby kok."],
+    "ack.recent": ["Ya?", "Hm?", "Iya?", "Lanjut?"],
+    "ack.normal": ["Ya, kenapa?", "Ya{n}?", "Ya, aku di sini.", "Ada apa?", "Kenapa?"],
+    "ack.pagi": ["Pagi! Ada apa?"],
+    "ack.larut": ["Iya, masih di sini."],
+    "filler": ["Bentar, aku lihat dulu ya."],
+    "out": ["Sepertinya kita perlu jeda sebentar. Untuk sekarang, aku belum bisa bantu kamu lagi. Tenang, pekerjaanmu tetap aman. Kamu bisa lanjut lagi setelah jatahmu diperbarui, atau tambahkan kredit kalau ingin melanjutkan sekarang."]
+  },
+  "en": {
+    "greet.first": ["Hi{n}, I'm aina. I'm here whenever you need me{wake}."],
+    "greet.early": ["Hi again{n}! I'm here whenever you need me.", "Hey{n}, I'm around."],
+    "greet.again": ["I'm back.", "Hi again{n}.", "Here if you need me."],
+    "greet.away": ["Hey{n}, it's been a while. I'm here if you need me.", "Welcome back{n}! I'm around."],
+    "greet.pagi": ["Morning{n}! Here when you need me.", "Good morning{n}. I'm around.", "Morning{n}. Hope today goes smoothly."],
+    "greet.siang": ["Hey{n}! I'm around.", "Hi{n}, here if you need a hand.", "Hey{n}. Just call me if you need anything."],
+    "greet.sore": ["Good afternoon{n}! I'm around.", "Hey{n}, I'm around this afternoon.", "Afternoon{n}. Just call me if you need anything."],
+    "greet.malam": ["Evening{n}. Here if you need me.", "Hey{n}, I'm around tonight.", "Evening{n}! Just call me if you need anything."],
+    "greet.larut": ["Still up{n}? I'm around.", "It's late{n}. I'm here if you need me.", "Hey{n}, I'm still around."],
+    "ack.recent": ["Yes?", "Hm?", "Yeah?", "Go on?"],
+    "ack.normal": ["Yeah, what's up?", "Yeah{n}?", "Yeah, I'm here.", "What's up?", "What is it?"],
+    "ack.pagi": ["Morning! What's up?"],
+    "ack.larut": ["Yeah, still here."],
+    "filler": ["One sec, let me check."],
+    "out": ["Looks like we need a short break. For now, I can't help you any further. Don't worry, your work is safe. You can pick up again once your allowance renews, or add credits if you'd like to keep going now."]
+  }
+}

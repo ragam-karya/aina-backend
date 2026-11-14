@@ -15,7 +15,8 @@ enabled = true
 head_sampling_rate = 0.1
 
 [build]
-command = "cargo install -q worker-build && worker-build --release"
+# worker-build pinned to the `worker` crate's minor (0.8): an unpinned install picks up a newer one that refuses to build.
+command = "cargo install -q worker-build --version ~0.8 && worker-build --release"
 
 [vars]
 PUBLIC_URL = "https://be.aina.ai.id"
@@ -38,7 +39,7 @@ MIDTRANS_PRODUCTION = "1"
 # "0" (production): any Google account signs in on Free.
 BETA = "0"
 # Accounts that use aina without limits (never charged, buy nothing), comma-separated. Applied at sign-in.
-UNLIMITED_EMAILS = "faisalmashuri16@gmail.com"
+UNLIMITED_EMAILS = "faisalmashuri16@gmail.com,ikhsantasfx@gmail.com"
 # For the daily analytics rollup (docs/analytics.md), with the secret CF_ANALYTICS_TOKEN.
 CF_ACCOUNT_ID = "d4d0be3bd86e0bc6cbfea92a6bd3c86e"
 

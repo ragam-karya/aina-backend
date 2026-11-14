@@ -347,6 +347,17 @@ impl Db {
         self.run("DELETE FROM inflight WHERE id = ?1", &[s(id)]).await
     }
 
+    /// Counts one free voice line for this account today (a WIB day), unless it already had `limit`.
+    pub async fn take_voice_line(&self, user: i64, day: &str, limit: i64) -> Result<bool> {
+        let r = self
+            .0
+            .prepare("INSERT INTO voice_lines (user_id, day, count) VALUES (?1, ?2, 1) ON CONFLICT (user_id, day) DO UPDATE SET count = count + 1 WHERE count < ?3")
+            .bind(&[n(user), s(day), n(limit)])?
+            .run()
+            .await?;
+        Ok(r.meta()?.and_then(|m| m.changes).unwrap_or(0) > 0)
+    }
+
     // ---- restricting accounts ----
 
     /// Restricts an account (None lifts it). The email is remembered while restricted, so a deleted
@@ -574,7 +585,7 @@ impl Db {
 
     /// The right to erasure (UU PDP). Payments stay for the tax records, without the account.
     pub async fn delete_user(&self, user: i64) -> Result<()> {
-        for sql in ["DELETE FROM tokens WHERE user_id = ?1", "DELETE FROM composio_sessions WHERE user_id = ?1", "DELETE FROM tasks WHERE user_id = ?1", "DELETE FROM inflight WHERE user_id = ?1", "DELETE FROM login_grants WHERE user_id = ?1", "DELETE FROM users WHERE id = ?1"] {
+        for sql in ["DELETE FROM tokens WHERE user_id = ?1", "DELETE FROM composio_sessions WHERE user_id = ?1", "DELETE FROM tasks WHERE user_id = ?1", "DELETE FROM inflight WHERE user_id = ?1", "DELETE FROM login_grants WHERE user_id = ?1", "DELETE FROM voice_lines WHERE user_id = ?1", "DELETE FROM users WHERE id = ?1"] {
             self.run(sql, &[n(user)]).await?;
         }
         Ok(())
