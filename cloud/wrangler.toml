@@ -40,6 +40,9 @@ MIDTRANS_PRODUCTION = "1"
 BETA = "0"
 # Accounts that use aina without limits (never charged, buy nothing), comma-separated. Applied at sign-in.
 UNLIMITED_EMAILS = "faisalmashuri16@gmail.com,ikhsantasfx@gmail.com"
+# Basic auth ("user:password") for the read-only usage reports, GET /admin/usage/* (docs/usage-analytics.md).
+# Every other /admin call still needs ADMIN_TOKEN. Empty: only ADMIN_TOKEN opens them.
+USAGE_BASIC_AUTH = "admin:admin"
 # For the daily analytics rollup (docs/analytics.md), with the secret CF_ANALYTICS_TOKEN.
 CF_ACCOUNT_ID = "d4d0be3bd86e0bc6cbfea92a6bd3c86e"
 
