@@ -1,0 +1,543 @@
+openapi: 3.0.3
+info:
+  title: aina Cloud – AI usage & leaderboard API
+  version: "1.0.0"
+  description: |
+    Endpoint analitik pemakaian AI (database `aina-usage`) dan leaderboard user.
+    Penjelasan lengkap: `docs/usage-analytics.md`.
+
+    **Satuan**
+    - `costIdr` = biaya API sungguhan yang aina bayar ke provider (HPP), rupiah.
+    - `credits` = kredit aina yang dipotong dari user.
+    - `tokens` = total semua jenis token (input, output, cache read/write, audio in/out).
+    - `helps` = berapa kali aina membantu (jawaban Claude atau balasan realtime yang berhasil).
+    - Hari dalam **WIB**, format `YYYY-MM-DD`.
+
+    **Auth**
+    - Endpoint `/v1/*`: token akun app (`bct_…`) di `Authorization: Bearer`.
+    - Endpoint `/admin/*`: `ADMIN_TOKEN` di `Authorization: Bearer`. Token salah → `404`.
+servers:
+  - url: https://be.aina.ai.id
+    description: Production
+  - url: http://127.0.0.1:8787
+    description: Lokal (`npx wrangler dev --local` dari `cloud/`)
+tags:
+  - name: Leaderboard
+    description: Untuk app. Hanya user yang memilih ikut yang tampil, dengan nama yang mereka setujui.
+  - name: Admin usage
+    description: Laporan bisnis. Butuh `ADMIN_TOKEN`.
+
+paths:
+  /v1/leaderboard:
+    get:
+      tags: [Leaderboard]
+      summary: Lihat leaderboard dan posisi sendiri
+      description: |
+        20 teratas dari user yang ikut, diurutkan menurut `helps` lalu hari aktif.
+        User yang belum ikut tetap melihat angkanya sendiri di `me` (tanpa `rank`).
+      security: [{ appToken: [] }]
+      parameters:
+        - name: period
+          in: query
+          description: "`week` = 7 hari WIB terakhir (default), `month` = 30 hari, `all` = sepanjang waktu."
+          schema: { type: string, enum: [week, month, all], default: week }
+      responses:
+        "200":
+          description: Leaderboard
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Leaderboard" }
+              example:
+                period: month
+                from: "2026-10-16"
+                to: "2026-11-14"
+                top:
+                  - { rank: 1, name: "Sari W.", helps: 3, days: 1, me: false }
+                  - { rank: 2, name: "Budi Keren", helps: 1, days: 1, me: true }
+                me: { joined: true, name: "Budi Keren", helps: 1, days: 1, rank: 2 }
+                suggestedName: "Budi S."
+        "401": { $ref: "#/components/responses/Unauthorized" }
+    put:
+      tags: [Leaderboard]
+      summary: Ikut leaderboard / ganti nama
+      description: Tanpa `name`, dipakai nama depan + inisial nama belakang dari Google (`suggestedName`).
+      security: [{ appToken: [] }]
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                name: { type: string, minLength: 2, maxLength: 24, example: "Budi Keren" }
+            examples:
+              pakaiNamaSendiri: { summary: Nama pilihan user, value: { name: "Budi Keren" } }
+              pakaiNamaGoogle: { summary: Nama dari Google ("Sari W."), value: {} }
+      responses:
+        "200":
+          description: Sudah ikut. `me` untuk periode `week`.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  period: { type: string, example: week }
+                  me: { $ref: "#/components/schemas/Standing" }
+              example:
+                period: week
+                me: { joined: true, name: "Budi Keren", helps: 1, days: 1, rank: 2 }
+        "400":
+          description: Nama kurang dari 2 huruf.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+              example: { type: error, error: { type: invalid_request_error, message: "Nama untuk leaderboard 2 sampai 24 huruf." } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+    delete:
+      tags: [Leaderboard]
+      summary: Keluar dari leaderboard
+      security: [{ appToken: [] }]
+      responses:
+        "200":
+          description: Sudah keluar.
+          content:
+            application/json:
+              example: { joined: false }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+  /admin/usage/summary:
+    get:
+      tags: [Admin usage]
+      summary: Ringkasan total, margin, per provider dan per model
+      description: |
+        Jawaban "boncos atau tidak" (`margin.loss`) dan bahan perbandingan model/provider
+        (`byModel`: token, HPP, `tokensPerCredit`, `failRate`, `avgMs`). `/admin/usage` sama dengan ini.
+      security: [{ adminToken: [] }]
+      parameters:
+        - $ref: "#/components/parameters/From"
+        - $ref: "#/components/parameters/To"
+        - $ref: "#/components/parameters/Days"
+      responses:
+        "200":
+          description: Ringkasan
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  from: { type: string }
+                  to: { type: string }
+                  total: { $ref: "#/components/schemas/UsageTotals" }
+                  margin: { $ref: "#/components/schemas/Margin" }
+                  byProvider:
+                    type: array
+                    items:
+                      allOf:
+                        - type: object
+                          properties: { provider: { type: string, enum: [anthropic, openai, elevenlabs] } }
+                        - $ref: "#/components/schemas/UsageTotals"
+                  byModel:
+                    type: array
+                    items:
+                      allOf:
+                        - type: object
+                          properties:
+                            provider: { type: string }
+                            model: { type: string }
+                            route: { type: string }
+                        - $ref: "#/components/schemas/UsageTotals"
+              example:
+                from: "2026-11-08"
+                to: "2026-11-14"
+                total:
+                  calls_ok: 4
+                  calls_failed: 2
+                  input_tokens: 2000
+                  output_tokens: 0
+                  cache_read_tokens: 1600
+                  cache_write_tokens: 0
+                  audio_in_tokens: 2400
+                  audio_out_tokens: 2400
+                  web_searches: 0
+                  audio_ms: 0
+                  chars: 0
+                  helps: 4
+                  users: 2
+                  active_days: 1
+                  tokens: 8400
+                  audioMinutes: 0
+                  costIdr: 1326.24
+                  costUsd: 0.0737
+                  credits: 7.804
+                  idrPerCredit: 169.94
+                  tokensPerCredit: 1076
+                  failRate: 0.3333
+                  avgMs: 29
+                margin: { revenueIdr: 49000, costIdr: 1326.24, grossProfitIdr: 47673.76, grossMargin: 0.9729, loss: false }
+                byProvider:
+                  - provider: openai
+                    calls_ok: 4
+                    calls_failed: 0
+                    tokens: 8400
+                    helps: 4
+                    users: 2
+                    costIdr: 1326.24
+                    credits: 7.804
+                    tokensPerCredit: 1076
+                    failRate: 0
+                    avgMs: 29
+                  - provider: anthropic
+                    calls_ok: 0
+                    calls_failed: 2
+                    tokens: 0
+                    helps: 0
+                    users: 0
+                    costIdr: 0
+                    credits: 0
+                    tokensPerCredit: null
+                    failRate: 1
+                    avgMs: null
+                byModel:
+                  - provider: openai
+                    model: gpt-realtime-mini
+                    route: realtime
+                    calls_ok: 4
+                    calls_failed: 0
+                    input_tokens: 2000
+                    cache_read_tokens: 1600
+                    audio_in_tokens: 2400
+                    audio_out_tokens: 2400
+                    tokens: 8400
+                    costIdr: 1326.24
+                    credits: 7.804
+                    tokensPerCredit: 1076
+                    failRate: 0
+                    avgMs: 29
+        "404": { $ref: "#/components/responses/AdminNotFound" }
+        "409": { $ref: "#/components/responses/NoUsageDb" }
+
+  /admin/usage/daily:
+    get:
+      tags: [Admin usage]
+      summary: Deret harian (untuk grafik)
+      description: Per hari WIB, urut tanggal. Berapa user aktif, berapa kali aina membantu, token, HPP, kredit.
+      security: [{ adminToken: [] }]
+      parameters:
+        - $ref: "#/components/parameters/From"
+        - $ref: "#/components/parameters/To"
+        - $ref: "#/components/parameters/Days"
+      responses:
+        "200":
+          description: Hari-hari
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  from: { type: string }
+                  to: { type: string }
+                  days:
+                    type: array
+                    items:
+                      allOf:
+                        - type: object
+                          properties: { day: { type: string, example: "2026-11-14" } }
+                        - $ref: "#/components/schemas/UsageTotals"
+              example:
+                from: "2026-11-13"
+                to: "2026-11-14"
+                days:
+                  - { day: "2026-11-13", users: 12, helps: 87, calls_ok: 240, calls_failed: 3, tokens: 1520000, costIdr: 18450.5, credits: 108.53, tokensPerCredit: 14005, failRate: 0.0124, avgMs: 2210 }
+                  - { day: "2026-11-14", users: 2, helps: 4, calls_ok: 4, calls_failed: 2, tokens: 8400, costIdr: 1326.24, credits: 7.804, tokensPerCredit: 1076, failRate: 0.3333, avgMs: 29 }
+        "404": { $ref: "#/components/responses/AdminNotFound" }
+        "409": { $ref: "#/components/responses/NoUsageDb" }
+
+  /admin/usage/users:
+    get:
+      tags: [Admin usage]
+      summary: Pemakaian per user + margin
+      description: |
+        Token, HPP, kredit per user, dengan email/paket dari `badi-cloud` dan pendapatan (pembayaran `paid`
+        di rentang itu). `margin.loss = true` berarti biaya API user itu lebih besar dari yang ia bayar.
+      security: [{ adminToken: [] }]
+      parameters:
+        - $ref: "#/components/parameters/From"
+        - $ref: "#/components/parameters/To"
+        - $ref: "#/components/parameters/Days"
+        - name: sort
+          in: query
+          schema: { type: string, enum: [cost, helps, tokens], default: cost }
+        - name: limit
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 1000, default: 50 }
+      responses:
+        "200":
+          description: User
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  from: { type: string }
+                  to: { type: string }
+                  users:
+                    type: array
+                    items:
+                      allOf:
+                        - type: object
+                          properties:
+                            user_id: { type: integer }
+                            email: { type: string }
+                            name: { type: string, nullable: true }
+                            plan: { type: string }
+                            margin: { $ref: "#/components/schemas/Margin" }
+                        - $ref: "#/components/schemas/UsageTotals"
+              example:
+                from: "2026-11-08"
+                to: "2026-11-14"
+                users:
+                  - user_id: 101
+                    email: sari@test.local
+                    name: Sari Wulandari
+                    plan: free
+                    helps: 3
+                    active_days: 1
+                    tokens: 6300
+                    costIdr: 994.68
+                    credits: 5.853
+                    idrPerCredit: 169.94
+                    tokensPerCredit: 1076
+                    margin: { revenueIdr: 49000, costIdr: 994.68, grossProfitIdr: 48005.32, grossMargin: 0.9797, loss: false }
+                  - user_id: 102
+                    email: budi@test.local
+                    name: Budi Santoso
+                    plan: free
+                    helps: 1
+                    active_days: 1
+                    tokens: 2100
+                    costIdr: 331.56
+                    credits: 1.951
+                    idrPerCredit: 169.94
+                    tokensPerCredit: 1076
+                    margin: { revenueIdr: 0, costIdr: 331.56, grossProfitIdr: -331.56, grossMargin: null, loss: true }
+        "404": { $ref: "#/components/responses/AdminNotFound" }
+        "409": { $ref: "#/components/responses/NoUsageDb" }
+
+  /admin/usage/user:
+    get:
+      tags: [Admin usage]
+      summary: Satu user, per hari per model
+      security: [{ adminToken: [] }]
+      parameters:
+        - name: email
+          in: query
+          required: true
+          schema: { type: string, format: email, example: sari@test.local }
+        - $ref: "#/components/parameters/From"
+        - $ref: "#/components/parameters/To"
+        - $ref: "#/components/parameters/Days"
+      responses:
+        "200":
+          description: Pemakaian user
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  from: { type: string }
+                  to: { type: string }
+                  email: { type: string }
+                  userId: { type: integer }
+                  margin: { $ref: "#/components/schemas/Margin" }
+                  days:
+                    type: array
+                    items:
+                      allOf:
+                        - type: object
+                          properties:
+                            day: { type: string }
+                            provider: { type: string }
+                            model: { type: string }
+                            route: { type: string }
+                        - $ref: "#/components/schemas/UsageTotals"
+              example:
+                from: "2026-11-08"
+                to: "2026-11-14"
+                email: sari@test.local
+                userId: 101
+                margin: { revenueIdr: 49000, costIdr: 994.68, grossProfitIdr: 48005.32, grossMargin: 0.9797, loss: false }
+                days:
+                  - { day: "2026-11-14", provider: openai, model: gpt-realtime-mini, route: realtime, calls_ok: 3, calls_failed: 0, helps: 3, tokens: 6300, costIdr: 994.68, credits: 5.853, tokensPerCredit: 1076, failRate: 0, avgMs: 31 }
+                  - { day: "2026-11-14", provider: anthropic, model: claude-haiku-5-5, route: messages, calls_ok: 0, calls_failed: 1, helps: 0, tokens: 0, costIdr: 0, credits: 0, tokensPerCredit: null, failRate: 1, avgMs: null }
+        "404":
+          description: Email tidak ditemukan, atau ADMIN_TOKEN salah.
+        "409": { $ref: "#/components/responses/NoUsageDb" }
+
+  /admin/usage/features:
+    get:
+      tags: [Admin usage]
+      summary: Per fitur app (x-aina-kind)
+      description: Fitur mana yang paling sering dipakai dan paling mahal (`tanya`, `agent`, `dikte`, …; kosong = app lama tanpa header).
+      security: [{ adminToken: [] }]
+      parameters:
+        - $ref: "#/components/parameters/From"
+        - $ref: "#/components/parameters/To"
+        - $ref: "#/components/parameters/Days"
+      responses:
+        "200":
+          description: Fitur
+          content:
+            application/json:
+              example:
+                from: "2026-11-08"
+                to: "2026-11-14"
+                features:
+                  - { feature: tanya, users: 2, helps: 4, calls_ok: 4, calls_failed: 0, tokens: 8400, costIdr: 1326.24, credits: 7.804 }
+                  - { feature: agent, users: 0, helps: 0, calls_ok: 0, calls_failed: 1, tokens: 0, costIdr: 0, credits: 0 }
+        "404": { $ref: "#/components/responses/AdminNotFound" }
+        "409": { $ref: "#/components/responses/NoUsageDb" }
+
+  /admin/usage/hours:
+    get:
+      tags: [Admin usage]
+      summary: Jam pemakaian (WIB)
+      description: Panggilan sukses per jam 0-23 WIB. Hanya mencakup 180 hari terakhir (umur `ai_calls`).
+      security: [{ adminToken: [] }]
+      parameters:
+        - $ref: "#/components/parameters/From"
+        - $ref: "#/components/parameters/To"
+        - $ref: "#/components/parameters/Days"
+      responses:
+        "200":
+          description: Jam
+          content:
+            application/json:
+              example:
+                from: "2026-11-08"
+                to: "2026-11-14"
+                hours:
+                  - { hour: 9, calls: 120, users: 8 }
+                  - { hour: 14, calls: 4, users: 2 }
+        "404": { $ref: "#/components/responses/AdminNotFound" }
+        "409": { $ref: "#/components/responses/NoUsageDb" }
+
+components:
+  securitySchemes:
+    appToken:
+      type: http
+      scheme: bearer
+      description: Token akun dari app (`bct_…`).
+    adminToken:
+      type: http
+      scheme: bearer
+      description: "`ADMIN_TOKEN` (secret Worker, minimal 24 karakter)."
+
+  parameters:
+    From:
+      name: from
+      in: query
+      description: Hari WIB pertama (inklusif). Tanpa `from`/`to` dipakai `days`.
+      schema: { type: string, format: date, example: "2026-11-01" }
+    To:
+      name: to
+      in: query
+      description: Hari WIB terakhir (inklusif). Default hari ini.
+      schema: { type: string, format: date, example: "2026-11-30" }
+    Days:
+      name: days
+      in: query
+      description: Jumlah hari sampai hari ini, kalau `from` tidak diisi.
+      schema: { type: integer, minimum: 1, maximum: 3660, default: 30 }
+
+  responses:
+    Unauthorized:
+      description: Tanpa token akun yang sah.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    AdminNotFound:
+      description: ADMIN_TOKEN salah atau tidak ada (API admin tidak menampakkan diri).
+    NoUsageDb:
+      description: Worker belum punya binding `USAGE`.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+          example: { type: error, error: { type: invalid_request_error, message: "The USAGE database is not bound (wrangler.toml, [[d1_databases]] binding USAGE)." } }
+
+  schemas:
+    Error:
+      type: object
+      properties:
+        type: { type: string, example: error }
+        error:
+          type: object
+          properties:
+            type: { type: string, example: invalid_request_error }
+            message: { type: string }
+
+    Standing:
+      type: object
+      description: Posisi user sendiri.
+      properties:
+        joined: { type: boolean, description: Sudah ikut leaderboard. }
+        name: { type: string, nullable: true }
+        helps: { type: integer, description: Berapa kali aina membantu di periode ini. }
+        days: { type: integer, description: Hari aktif di periode ini. }
+        rank: { type: integer, nullable: true, description: "null kalau belum ikut atau belum ada bantuan." }
+
+    Leaderboard:
+      type: object
+      properties:
+        period: { type: string, enum: [week, month, all] }
+        from: { type: string, example: "2026-11-08" }
+        to: { type: string, example: "2026-11-14" }
+        top:
+          type: array
+          items:
+            type: object
+            properties:
+              rank: { type: integer }
+              name: { type: string }
+              helps: { type: integer }
+              days: { type: integer }
+              me: { type: boolean, description: Baris ini user yang bertanya. }
+        me: { $ref: "#/components/schemas/Standing" }
+        suggestedName: { type: string, description: Nama default dari Google untuk tombol "Ikut". }
+
+    Margin:
+      type: object
+      description: Pendapatan (pembayaran paid di rentang itu) dibanding HPP.
+      properties:
+        revenueIdr: { type: number }
+        costIdr: { type: number }
+        grossProfitIdr: { type: number }
+        grossMargin: { type: number, nullable: true, description: "0-1; null kalau tidak ada pendapatan." }
+        loss: { type: boolean, description: "true = boncos (HPP > pendapatan)." }
+
+    UsageTotals:
+      type: object
+      description: Jumlah untuk satu kelompok (total, provider, model, hari, user, atau fitur).
+      properties:
+        calls_ok: { type: integer }
+        calls_failed: { type: integer, description: Ditolak aturan aina, error provider, atau provider tak terjangkau. }
+        input_tokens: { type: integer }
+        output_tokens: { type: integer }
+        cache_read_tokens: { type: integer }
+        cache_write_tokens: { type: integer }
+        audio_in_tokens: { type: integer, description: Realtime. }
+        audio_out_tokens: { type: integer, description: Realtime. }
+        web_searches: { type: integer }
+        audio_ms: { type: integer, description: Audio yang ditranskrip. }
+        chars: { type: integer, description: Karakter yang dibacakan (TTS, ElevenLabs, kalimat gratis). }
+        helps: { type: integer }
+        users: { type: integer, description: User dengan minimal satu panggilan sukses. }
+        active_days: { type: integer }
+        tokens: { type: number, description: Total semua jenis token. }
+        audioMinutes: { type: number }
+        costIdr: { type: number, description: HPP rupiah. }
+        costUsd: { type: number }
+        credits: { type: number, description: Kredit yang dipotong. }
+        idrPerCredit: { type: number, nullable: true, description: "HPP per kredit; ≈170 normal." }
+        tokensPerCredit: { type: number, nullable: true, description: 1 kredit = berapa token. }
+        failRate: { type: number, nullable: true }
+        avgMs: { type: number, nullable: true, description: Rata-rata waktu per panggilan sukses. }
