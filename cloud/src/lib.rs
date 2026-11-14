@@ -1023,6 +1023,72 @@ async fn eleven(mut req: Request, env: &Env, db: &Db, a: Account, voice: &str) -
     paid_call(env, db, &a, &call, cost, res, "application/octet-stream", &traced, chars as u64).await
 }
 
+/// Percent-encodes a header value (a voice line can hold any letter of a nickname).
+fn pct(s: &str) -> String {
+    s.bytes().map(|b| if b.is_ascii_alphanumeric() || b"-_.~".contains(&b) { (b as char).to_string() } else { format!("%{b:02X}") }).collect()
+}
+
+/// POST /v1/voice/line { line, lang, name, wake, engine: "eleven" | "openai", voice, model }: one of aina's
+/// fixed lines (the greeting, the replies when called, the filler, the out-of-credits line), spoken for
+/// free, credits or not. The text is composed here from the line's id (badi_cloud_core::voice_lines), so
+/// nothing else can be read out for free; it comes back percent-encoded in `x-aina-text` with the audio
+/// (PCM, 24 kHz). Capped per account per WIB day: the app keeps every clip on disk.
+async fn voice_line(mut req: Request, env: &Env, db: &Db, a: Account) -> Result<Response> {
+    let v: Value = serde_json::from_slice(&req.bytes().await?).unwrap_or(Value::Null);
+    let s = |k: &str| v[k].as_str().unwrap_or("").to_string();
+    let Some(text) = core::voice_lines::compose(&s("lang"), &s("line"), &s("name"), v["wake"] == true) else {
+        return error(400, "invalid_request_error", "Unknown voice line.");
+    };
+    let eleven = s("engine") == "eleven";
+    let traced = track::Call::new(&req, "voice_line", &s("model"), a.id);
+    let t = now();
+    let refusal = if !eleven && let Err(r) = rules::check_tts_model(&s("model")) {
+        Some(r)
+    } else if !a.unlimited() && !db.take_voice_line(a.id, &core::stats::wib_day(t), core::voice_lines::DAILY_LIMIT).await? {
+        Some(rules::refusal(429, "rate_limit_error", "Kalimat suara gratis aina untuk hari ini sudah habis. Coba lagi besok."))
+    } else {
+        None
+    };
+    if let Some(r) = refusal {
+        track::refused(env, &traced, r.status, r.kind);
+        return refuse(r);
+    }
+    let call = core::random_hex(12);
+    if !a.unlimited() && !db.begin_call(&call, a.id, t).await? {
+        let r = rules::refusal(429, "rate_limit_error", "Terlalu banyak permintaan aina berjalan bersamaan. Tunggu sebentar lalu coba lagi.");
+        track::refused(env, &traced, r.status, r.kind);
+        return refuse(r);
+    }
+    let lang = if s("lang") == "en" { "en" } else { "id" };
+    let res = if eleven {
+        let voice: String = s("voice").chars().filter(char::is_ascii_alphanumeric).collect();
+        let url = format!("https://api.elevenlabs.io/v1/text-to-speech/{voice}/stream?output_format=pcm_24000");
+        let body = json!({ "text": text, "model_id": s("model"), "language_code": lang });
+        upstream(Method::Post, &url, &[("xi-api-key", secret(env, "ELEVENLABS_API_KEY")), ("content-type", "application/json".into())], Some(body.to_string().into_bytes())).await
+    } else {
+        let body = json!({ "model": s("model"), "voice": s("voice"), "input": text, "response_format": "pcm" });
+        let auth = format!("Bearer {}", secret(env, "OPENAI_API_KEY"));
+        upstream(Method::Post, "https://api.openai.com/v1/audio/speech", &[("authorization", auth), ("content-type", "application/json".into())], Some(body.to_string().into_bytes())).await
+    };
+    let res = match res {
+        Ok(r) => r,
+        Err(e) => {
+            end_call(db, &call).await;
+            track::write(env, &traced, Outcome::error());
+            return Err(e);
+        }
+    };
+    let first_ms = now() - traced.start;
+    let ok = res.status_code() < 300;
+    // Booked at no cost: the trace still shows how much these free lines are used.
+    let chars = text.chars().count() as u64;
+    track::write(env, &traced, if ok { Outcome::ok([chars, 0, 0, 0, 0], 0, first_ms, false) } else { Outcome::upstream(res.status_code(), first_ms) });
+    end_call(db, &call).await;
+    let out = pass(res, "application/octet-stream")?;
+    out.headers().set("x-aina-text", &pct(&text))?;
+    Ok(out)
+}
+
 // Realtime voice: the app's WebRTC audio goes straight to OpenAI, so the cloud mints the one-minute
 // client secret that opens the session (the account must have room left) and bills each reply from the
 // usage the app reports from its response.done events.
@@ -1251,6 +1317,7 @@ async fn fetch(req: Request, env: Env, ctx: Context) -> Result<Response> {
         (Method::Post, "/v1/messages/count_tokens") => messages(req, env.clone(), &ctx, &db, a, true).await,
         (Method::Post, "/v1/audio/transcriptions") => transcribe(req, &env, &db, a).await,
         (Method::Post, "/v1/audio/speech") => speech(req, &env, &db, a).await,
+        (Method::Post, "/v1/voice/line") => voice_line(req, &env, &db, a).await,
         (Method::Post, "/v1/realtime/client_secrets") => realtime_secret(req, &env, &db, a).await,
         (Method::Post, "/v1/realtime/usage") => realtime_usage(req, &env, &db, a).await,
         (Method::Post, p) if p.starts_with("/eleven/v1/text-to-speech/") && p.ends_with("/stream") => {
