@@ -464,7 +464,7 @@ components:
         application/json:
           schema: { $ref: "#/components/schemas/Error" }
     AdminNotFound:
-      description: Belum login (`admin` / `admin`) atau password salah. Jawabannya 401 dengan `WWW-Authenticate: Basic`.
+      description: "Belum login (`admin` / `admin`) atau password salah. Jawabannya 401 dengan `WWW-Authenticate: Basic`."
       content:
         application/json:
           example: { type: error, error: { type: authentication_error, message: "Masuk dulu (Basic auth)." } }
