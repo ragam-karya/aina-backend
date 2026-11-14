@@ -289,14 +289,15 @@ impl Db {
 
     /// Books a call's cost (milli-rupiah) as credits at the rate in force: the subscription's first, then
     /// the credits that never lapse, past zero as debt (Meter::spend). One UPDATE that subtracts from the
-    /// row as it is, so calls booked at the same time can't overwrite each other's spending.
-    pub async fn spend(&self, user: i64, cost: i64, now: i64) -> Result<()> {
+    /// row as it is, so calls booked at the same time can't overwrite each other's spending. Answers the
+    /// milli-credits taken (0 for an unlimited account).
+    pub async fn spend(&self, user: i64, cost: i64, now: i64) -> Result<i64> {
         if cost <= 0 {
-            return Ok(());
+            return Ok(0);
         }
-        let Some(a) = self.user(user).await? else { return Ok(()) };
+        let Some(a) = self.user(user).await? else { return Ok(0) };
         if a.unlimited() {
-            return Ok(());
+            return Ok(0);
         }
         let c = self.catalog().await?;
         let credits = c.to_credits(cost);
@@ -307,10 +308,50 @@ impl Db {
                 "UPDATE users SET sub_left = sub_left - MIN(?2, MAX(sub_left, 0)), topup = topup - (?2 - MIN(?2, MAX(sub_left, 0))) WHERE id = ?1 AND plan != ?3",
                 &[n(user), n(credits), unlimited],
             )
-            .await
+            .await?;
         } else {
-            self.run("UPDATE users SET topup = topup - ?2 WHERE id = ?1 AND plan != ?3", &[n(user), n(credits), unlimited]).await
+            self.run("UPDATE users SET topup = topup - ?2 WHERE id = ?1 AND plan != ?3", &[n(user), n(credits), unlimited]).await?;
         }
+        Ok(credits)
+    }
+
+    // ---------- for the usage reports (src/usage.rs) ----------
+
+    /// Rupiah paid per account between `from` and `to` (ms, `to` excluded).
+    pub async fn revenue(&self, from: i64, to: i64) -> Result<Vec<(i64, f64)>> {
+        #[derive(Deserialize)]
+        struct Row {
+            user_id: f64,
+            amount: f64,
+        }
+        let rows = self.0.prepare("SELECT user_id, SUM(amount) AS amount FROM payments WHERE status = 'paid' AND paid_at >= ?1 AND paid_at < ?2 GROUP BY user_id").bind(&[n(from), n(to)])?.all().await?.results::<Row>()?;
+        Ok(rows.into_iter().map(|r| (r.user_id as i64, r.amount)).collect())
+    }
+
+    /// Email, name and plan of the given accounts.
+    pub async fn people(&self, ids: &[i64]) -> Result<Vec<(i64, String, Option<String>, String)>> {
+        #[derive(Deserialize)]
+        struct Row {
+            id: f64,
+            email: String,
+            name: Option<String>,
+            plan: String,
+        }
+        if ids.is_empty() {
+            return Ok(vec![]);
+        }
+        let list = ids.iter().map(|i| i.to_string()).collect::<Vec<_>>().join(",");
+        let rows = self.0.prepare(format!("SELECT id, email, name, plan FROM users WHERE id IN ({list})")).all().await?.results::<Row>()?;
+        Ok(rows.into_iter().map(|r| (r.id as i64, r.email, r.name, r.plan)).collect())
+    }
+
+    /// An account's id by its email.
+    pub async fn user_id_by_email(&self, email: &str) -> Result<Option<i64>> {
+        #[derive(Deserialize)]
+        struct Row {
+            id: f64,
+        }
+        Ok(self.first::<Row>("SELECT id FROM users WHERE email = ?1", &[s(email)]).await?.map(|r| r.id as i64))
     }
 
     /// A task that began within the limits may finish.
