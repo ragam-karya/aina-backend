@@ -8,6 +8,9 @@ Database D1 tersendiri untuk menjawab pertanyaan bisnis tentang AI aina dengan a
 - Model mana yang mahal, lambat, atau sering gagal (bahan pertimbangan pindah ke OpenRouter)?
 - Leaderboard untuk menyemangati user.
 
+**API docs (Swagger):** buka `docs/api/index.html` di browser (cukup double-click). Sumbernya
+`docs/api/usage-openapi.yaml`; setelah mengubahnya, jalankan `python docs/api/build.py`.
+
 Kode: `cloud/src/usage.rs` (D1), `cloud/src/track.rs` (pencatatan), `crates/badi-cloud-core/src/usage.rs`
 (aturan, dites). Skema: `cloud/migrations-usage/`.
 
