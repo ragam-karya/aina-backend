@@ -1350,6 +1350,9 @@ async fn fetch(req: Request, env: Env, ctx: Context) -> Result<Response> {
         (Method::Get, "/") => return Response::ok("aina Cloud"),
         (Method::Get, "/privasi") => return Response::from_html(include_str!("privasi.html")),
         (Method::Get, "/ketentuan") => return Response::from_html(include_str!("ketentuan.html")),
+        // The API docs (Swagger UI, docs/api/; rebuild with python docs/api/build.py). Endpoints only:
+        // every admin call still needs ADMIN_TOKEN.
+        (Method::Get, "/docs" | "/docs/") => return Response::from_html(include_str!("../../docs/api/index.html")),
         // The browser's pages live on the website now.
         (Method::Get, "/masuk" | "/langganan" | "/terima-kasih") => return to_frontend(&req, &env),
         (Method::Get, "/download" | "/download/windows") => return download(&env).await,
