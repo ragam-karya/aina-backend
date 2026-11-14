@@ -53,7 +53,7 @@ const SOURCE: &str = "if(blob4 != '', blob4, if(blob3 != '', blob3, '(langsung)'
 
 /// The rollup's queries: (metric, dataset, filter, dimensions, value). Every row a query gives becomes one
 /// daily_stats row; its dimensions are joined with ':' ("" without any).
-const QUERIES: [(&str, &str, &str, &[&str], &str); 17] = [
+const QUERIES: [(&str, &str, &str, &[&str], &str); 18] = [
     ("visits", WEB, "blob1 = 'pageview' AND blob9 = '0'", &[], "SUM(_sample_interval)"),
     ("visitors", WEB, "blob1 = 'pageview' AND blob9 = '0'", &[], "COUNT(DISTINCT index1)"),
     ("downloads", WEB, "blob1 = 'download' AND double2 = 200 AND blob9 = '0'", &[], "SUM(_sample_interval)"),
@@ -67,7 +67,9 @@ const QUERIES: [(&str, &str, &str, &[&str], &str); 17] = [
     ("downloads_by_os", WEB, "blob1 = 'download' AND double2 = 200 AND blob9 = '0'", &["blob11"], "SUM(_sample_interval)"),
     ("ai_users", AI, "blob5 = 'ok'", &[], "COUNT(DISTINCT index1)"),
     ("ai_calls", AI, "blob5 = 'ok'", &["blob1", "blob2"], "SUM(_sample_interval)"),
-    ("ai_credits", AI, "blob5 = 'ok'", &["blob1", "blob2"], "SUM(_sample_interval * double8) / 1000"),
+    // double8 is milli-rupiah of API cost (HPP); double11 the milli-credits taken (from 2026-11-14).
+    ("ai_cost_idr", AI, "blob5 = 'ok'", &["blob1", "blob2"], "SUM(_sample_interval * double8) / 1000"),
+    ("ai_credits", AI, "blob5 = 'ok'", &["blob1", "blob2"], "SUM(_sample_interval * double11) / 1000"),
     ("ai_calls_by_feature", AI, "blob5 = 'ok'", &["blob3"], "SUM(_sample_interval)"),
     ("ai_first_ms_p50", AI, "blob5 = 'ok' AND double9 > 0", &["blob1", "blob2"], "quantileWeighted(0.5)(double9, _sample_interval)"),
     ("ai_problems", AI, "blob5 != 'ok'", &["blob5", "blob6", "double2"], "SUM(_sample_interval)"),

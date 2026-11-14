@@ -7,6 +7,7 @@
 
 mod db;
 mod track;
+mod usage;
 
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
@@ -21,7 +22,8 @@ use worker::wasm_bindgen::JsValue;
 use worker::*;
 
 use crate::db::Db;
-use crate::track::Outcome;
+use crate::track::{Outcome, Units};
+use crate::usage::UsageDb;
 
 const TASK_GRACE_MS: i64 = 3_600_000;
 
@@ -273,6 +275,103 @@ async fn exchange(mut req: Request, db: &Db) -> Result<Response> {
     json_res(200, &json!({ "token": token, "freeCredits": free, "account": account.view(&catalog, t) }))
 }
 
+// ---------- AI usage: the business reports (admin) and the leaderboard (docs/usage-analytics.md) ----------
+
+/// GET /admin/usage[/summary|/daily|/features|/hours|/users|/user]: ?from=YYYY-MM-DD&to=YYYY-MM-DD (WIB
+/// days, inclusive) or ?days=30, ?limit=, ?sort=cost|helps|tokens (users), ?email= (user).
+async fn usage_report(env: &Env, db: &Db, what: &str, q: &std::collections::HashMap<String, String>, t: i64) -> Result<Response> {
+    let Some(u) = UsageDb::of(env) else {
+        return error(409, "invalid_request_error", "The USAGE database is not bound (wrangler.toml, [[d1_databases]] binding USAGE).");
+    };
+    let arg = |k: &str| q.get(k).map(String::as_str);
+    let days = arg("days").and_then(|d| d.parse::<i64>().ok()).unwrap_or(30).clamp(1, 3660);
+    let (from, to) = core::usage::range(arg("from"), arg("to"), days, t);
+    let limit = arg("limit").and_then(|l| l.parse::<i64>().ok()).unwrap_or(50).clamp(1, 1000);
+    let from_ms = core::usage::day_start_ms(&from).unwrap_or(0);
+    let to_ms = core::usage::day_start_ms(&to).map(|d| d + core::stats::DAY_MS).unwrap_or(t);
+    let cost_of = |v: &Value| v["costIdr"].as_f64().unwrap_or(0.0) * 1000.0;
+    match what {
+        "usage" | "usage/summary" => {
+            let total = u.total(&from, &to).await?;
+            let revenue: f64 = db.revenue(from_ms, to_ms).await?.iter().map(|(_, a)| a).sum();
+            json_res(
+                200,
+                &json!({
+                    "from": from, "to": to,
+                    "total": total,
+                    "margin": core::usage::margin(revenue, cost_of(&total)),
+                    "byProvider": u.grouped(&from, &to, &["provider"], "cost", 100).await?,
+                    "byModel": u.grouped(&from, &to, &["provider", "model", "route"], "cost", 200).await?,
+                }),
+            )
+        }
+        "usage/daily" => json_res(200, &json!({ "from": from, "to": to, "days": u.grouped(&from, &to, &["day"], "day", 3660).await? })),
+        "usage/features" => json_res(200, &json!({ "from": from, "to": to, "features": u.grouped(&from, &to, &["feature"], "cost", 200).await? })),
+        "usage/hours" => json_res(200, &json!({ "from": from, "to": to, "hours": u.hours(&from, &to).await? })),
+        "usage/users" => {
+            let mut rows = u.grouped(&from, &to, &["user_id"], arg("sort").unwrap_or("cost"), limit).await?;
+            let ids: Vec<i64> = rows.iter().filter_map(|r| r["user_id"].as_f64()).map(|x| x as i64).collect();
+            let people = db.people(&ids).await?;
+            let paid = db.revenue(from_ms, to_ms).await?;
+            for r in rows.iter_mut() {
+                let id = r["user_id"].as_f64().unwrap_or(-1.0) as i64;
+                let revenue = paid.iter().find(|(u, _)| *u == id).map(|(_, a)| *a).unwrap_or(0.0);
+                let margin = core::usage::margin(revenue, cost_of(r));
+                if let Some((_, email, name, plan)) = people.iter().find(|p| p.0 == id) {
+                    r["email"] = json!(email);
+                    r["name"] = json!(name);
+                    r["plan"] = json!(plan);
+                }
+                r["margin"] = margin;
+            }
+            json_res(200, &json!({ "from": from, "to": to, "users": rows }))
+        }
+        "usage/user" => {
+            let email = arg("email").and_then(core::clean_email).unwrap_or_default();
+            let Some(id) = db.user_id_by_email(&email).await? else { return refuse(rules::not_found()) };
+            let revenue: f64 = db.revenue(from_ms, to_ms).await?.iter().filter(|(u, _)| *u == id).map(|(_, a)| a).sum();
+            let rows = u.of_user(id, &from, &to).await?;
+            let cost: f64 = rows.iter().map(cost_of).sum();
+            json_res(200, &json!({ "from": from, "to": to, "email": email, "userId": id, "margin": core::usage::margin(revenue, cost), "days": rows }))
+        }
+        _ => refuse(rules::not_found()),
+    }
+}
+
+/// GET /v1/leaderboard?period=week|month|all: the top 20 of those who joined, by how often aina helped
+/// them, and where the person stands. Only names people chose (or agreed to) are shown.
+async fn leaderboard(req: &Request, env: &Env, a: &Account) -> Result<Response> {
+    let Some(u) = UsageDb::of(env) else { return refuse(rules::not_found()) };
+    let asked = req.url()?.query_pairs().find(|(k, _)| k == "period").map(|(_, v)| v.to_string()).unwrap_or_default();
+    let (period, from, to) = core::usage::period(&asked, now());
+    let top: Vec<Value> = u
+        .leaders(&from, &to, 20)
+        .await?
+        .into_iter()
+        .enumerate()
+        .map(|(i, r)| json!({ "rank": i + 1, "name": r.get("name"), "helps": r.get("helps"), "days": r.get("days"), "me": r.get("user_id").and_then(Value::as_f64) == Some(a.id as f64) }))
+        .collect();
+    let me = u.standing(a.id, &from, &to).await?;
+    json_res(200, &json!({ "period": period, "from": from, "to": to, "top": top, "me": me, "suggestedName": core::usage::default_name(a.name.as_deref()) }))
+}
+
+/// PUT /v1/leaderboard { name }: joins the leaderboard (or changes the name shown); without a name, the
+/// first name and last initial Google gave.
+async fn leaderboard_join(mut req: Request, env: &Env, a: &Account) -> Result<Response> {
+    let Some(u) = UsageDb::of(env) else { return refuse(rules::not_found()) };
+    let body: Value = req.json().await.unwrap_or(Value::Null);
+    let name = match body["name"].as_str() {
+        Some(raw) if !raw.trim().is_empty() => match core::usage::display_name(raw) {
+            Some(n) => n,
+            None => return error(400, "invalid_request_error", "Nama untuk leaderboard 2 sampai 24 huruf."),
+        },
+        _ => core::usage::default_name(a.name.as_deref()),
+    };
+    u.join(a.id, &name, now()).await?;
+    let (period, from, to) = core::usage::period("week", now());
+    json_res(200, &json!({ "period": period, "me": u.standing(a.id, &from, &to).await? }))
+}
+
 // ---------- admin: the price list, the beta invite list and credits (Postman: docs/aina-admin.postman_collection.json) ----------
 // Every call needs `Authorization: Bearer <ADMIN_TOKEN>`; with ADMIN_TOKEN unset (or short) the API
 // does not exist. Answers carry no prompts or usage details, only plans, invites and credits left.
@@ -285,6 +384,11 @@ async fn admin(mut req: Request, env: &Env, db: &Db, path: &str) -> Result<Respo
     let method = req.method();
     let query = |k: &str| req.url().ok().and_then(|u| u.query_pairs().find(|(n, _)| n == k).map(|(_, v)| v.to_string()));
     match (method, path) {
+        // AI usage for the business (docs/usage-analytics.md), from the aina-usage database.
+        (Method::Get, p) if p == "usage" || p.starts_with("usage/") => {
+            let q: std::collections::HashMap<String, String> = req.url()?.query_pairs().into_owned().collect();
+            usage_report(env, db, p, &q, t).await
+        }
         // The kept daily numbers (docs/analytics.md): ?days=30 (at most 400).
         (Method::Get, "stats") => {
             let days = query("days").and_then(|d| d.parse::<i64>().ok()).unwrap_or(30).clamp(1, 400);
@@ -767,6 +871,13 @@ async fn scheduled(_event: ScheduledEvent, env: Env, _ctx: ScheduleContext) {
         Ok(_) => {}
         Err(e) => console_log!("[stats] rollup: {e}"),
     }
+    // Single AI calls are kept KEEP_CALLS_DAYS; their daily totals stay.
+    if let Some(u) = UsageDb::of(&env) {
+        let before = core::stats::wib_day(now() - core::usage::KEEP_CALLS_DAYS * core::stats::DAY_MS);
+        if let Err(e) = u.prune(&before).await {
+            console_log!("[usage] prune: {e}");
+        }
+    }
 }
 
 // ---------- the daily analytics rollup ----------
@@ -863,13 +974,13 @@ async fn messages(mut req: Request, env: Env, ctx: &Context, db: &Db, a: Account
     }
     let traced = track::Call::new(&req, "messages", &model, a.id);
     if let Err(r) = rules::check_model(&model) {
-        track::refused(&env, &traced, r.status, r.kind);
+        track::refused(&env, &traced, r.status, r.kind).await;
         return refuse(r);
     }
     let call = match gate(&req, db, &a, true).await? {
         Ok(c) => c,
         Err(r) => {
-            track::refused(&env, &traced, r.status, r.kind);
+            track::refused(&env, &traced, r.status, r.kind).await;
             return refuse(r);
         }
     };
@@ -877,13 +988,13 @@ async fn messages(mut req: Request, env: Env, ctx: &Context, db: &Db, a: Account
         Ok(r) => r,
         Err(e) => {
             end_call(db, &call).await;
-            track::write(&env, &traced, Outcome::error());
+            track::record(&env, &traced, Outcome::error()).await;
             return Err(e);
         }
     };
     if res.status_code() >= 300 {
         end_call(db, &call).await;
-        track::write(&env, &traced, Outcome::upstream(res.status_code(), now() - traced.start));
+        track::record(&env, &traced, Outcome::upstream(res.status_code(), now() - traced.start)).await;
         return pass(res, "application/json");
     }
     let user = a.id;
@@ -895,8 +1006,9 @@ async fn messages(mut req: Request, env: Env, ctx: &Context, db: &Db, a: Account
         }
         // Whole replies: the first byte is the whole reply.
         let took = now() - traced.start;
-        track::write(&env, &traced, Outcome::ok(meter.usage, meter.cost(&model), took, false));
-        let spent = db.spend(user, meter.cost(&model), now()).await;
+        let cost = meter.cost(&model);
+        let spent = db.spend(user, cost, now()).await;
+        track::record(&env, &traced, Outcome::ok(meter.usage, Units::default(), cost, *spent.as_ref().unwrap_or(&0), took, false)).await;
         end_call(db, &call).await;
         spent?;
         let h = Headers::new();
@@ -920,16 +1032,18 @@ async fn messages(mut req: Request, env: Env, ctx: &Context, db: &Db, a: Account
     });
     ctx.wait_until(async move {
         let meter = rx.await.ok();
+        let db = env.d1("DB").ok().map(Db);
         if let Some(m) = &meter {
+            let cost = m.cost(&model);
+            let credits = match &db {
+                Some(db) => db.spend(user, cost, now()).await.unwrap_or(0),
+                None => 0,
+            };
             let first_ms = if first.get() > 0 { first.get() - traced.start } else { 0 };
-            track::write(&env, &traced, Outcome::ok(m.usage, m.cost(&model), first_ms, true));
+            track::record(&env, &traced, Outcome::ok(m.usage, Units::default(), cost, credits, first_ms, true)).await;
         }
-        if let Ok(d1) = env.d1("DB") {
-            let db = Db(d1);
-            if let Some(m) = meter {
-                let _ = db.spend(user, m.cost(&model), now()).await;
-            }
-            end_call(&db, &call).await;
+        if let Some(db) = &db {
+            end_call(db, &call).await;
         }
     });
     let h = Headers::new();
@@ -939,21 +1053,22 @@ async fn messages(mut req: Request, env: Env, ctx: &Context, db: &Db, a: Account
 }
 
 /// A priced upstream call with a slot: booked at `cost` when the upstream takes it, then the slot freed.
-/// `traced` and `usage` (characters or bytes sent) go to the call's trace.
+/// `traced`, `usage` (characters or bytes sent) and `units` go to the call's trace.
 #[allow(clippy::too_many_arguments)]
-async fn paid_call(env: &Env, db: &Db, a: &Account, call: &str, cost: i64, res: Result<Response>, stream_type: &str, traced: &track::Call, usage: u64) -> Result<Response> {
+async fn paid_call(env: &Env, db: &Db, a: &Account, call: &str, cost: i64, res: Result<Response>, stream_type: &str, traced: &track::Call, usage: u64, units: Units) -> Result<Response> {
     let res = match res {
         Ok(r) => r,
         Err(e) => {
             end_call(db, call).await;
-            track::write(env, traced, Outcome::error());
+            track::record(env, traced, Outcome::error()).await;
             return Err(e);
         }
     };
     let first_ms = now() - traced.start;
     let ok = res.status_code() < 300;
-    track::write(env, traced, if ok { Outcome::ok([usage, 0, 0, 0, 0], cost, first_ms, false) } else { Outcome::upstream(res.status_code(), first_ms) });
-    let spent = if ok { db.spend(a.id, cost, now()).await } else { Ok(()) };
+    let spent = if ok { db.spend(a.id, cost, now()).await } else { Ok(0) };
+    let credits = *spent.as_ref().unwrap_or(&0);
+    track::record(env, traced, if ok { Outcome::ok([usage, 0, 0, 0, 0], units, cost, credits, first_ms, false) } else { Outcome::upstream(res.status_code(), first_ms) }).await;
     end_call(db, call).await;
     spent?;
     pass(res, stream_type)
@@ -964,7 +1079,7 @@ async fn transcribe(mut req: Request, env: &Env, db: &Db, a: Account) -> Result<
     let call = match gate(&req, db, &a, true).await? {
         Ok(c) => c,
         Err(r) => {
-            track::refused(env, &traced, r.status, r.kind);
+            track::refused(env, &traced, r.status, r.kind).await;
             return refuse(r);
         }
     };
@@ -978,8 +1093,9 @@ async fn transcribe(mut req: Request, env: &Env, db: &Db, a: Account) -> Result<
     };
     let cost = stt_cost(body.len());
     let size = body.len() as u64;
+    let units = Units { audio_ms: core::usage::pcm_ms(body.len()), ..Units::default() };
     let res = upstream(Method::Post, "https://api.openai.com/v1/audio/transcriptions", &[("authorization", format!("Bearer {}", secret(env, "OPENAI_API_KEY"))), ("content-type", ctype)], Some(body)).await;
-    paid_call(env, db, &a, &call, cost, res, "application/json", &traced, size).await
+    paid_call(env, db, &a, &call, cost, res, "application/json", &traced, size, units).await
 }
 
 async fn speech(mut req: Request, env: &Env, db: &Db, a: Account) -> Result<Response> {
@@ -987,20 +1103,20 @@ async fn speech(mut req: Request, env: &Env, db: &Db, a: Account) -> Result<Resp
     let v: Value = serde_json::from_slice(&body).unwrap_or(Value::Null);
     let traced = track::Call::new(&req, "speech", v["model"].as_str().unwrap_or(""), a.id);
     if let Err(r) = rules::check_tts_model(v["model"].as_str().unwrap_or("")) {
-        track::refused(env, &traced, r.status, r.kind);
+        track::refused(env, &traced, r.status, r.kind).await;
         return refuse(r);
     }
     let call = match gate(&req, db, &a, true).await? {
         Ok(c) => c,
         Err(r) => {
-            track::refused(env, &traced, r.status, r.kind);
+            track::refused(env, &traced, r.status, r.kind).await;
             return refuse(r);
         }
     };
     let chars = v["input"].as_str().unwrap_or("").chars().count();
     let cost = tts_cost(chars, false);
     let res = upstream(Method::Post, "https://api.openai.com/v1/audio/speech", &[("authorization", format!("Bearer {}", secret(env, "OPENAI_API_KEY"))), ("content-type", "application/json".into())], Some(body)).await;
-    paid_call(env, db, &a, &call, cost, res, "application/octet-stream", &traced, chars as u64).await
+    paid_call(env, db, &a, &call, cost, res, "application/octet-stream", &traced, chars as u64, Units { chars: chars as u64, ..Units::default() }).await
 }
 
 async fn eleven(mut req: Request, env: &Env, db: &Db, a: Account, voice: &str) -> Result<Response> {
@@ -1011,7 +1127,7 @@ async fn eleven(mut req: Request, env: &Env, db: &Db, a: Account, voice: &str) -
     let call = match gate(&req, db, &a, true).await? {
         Ok(c) => c,
         Err(r) => {
-            track::refused(env, &traced, r.status, r.kind);
+            track::refused(env, &traced, r.status, r.kind).await;
             return refuse(r);
         }
     };
@@ -1020,7 +1136,7 @@ async fn eleven(mut req: Request, env: &Env, db: &Db, a: Account, voice: &str) -
     let voice: String = voice.chars().filter(char::is_ascii_alphanumeric).collect();
     let url = format!("https://api.elevenlabs.io/v1/text-to-speech/{voice}/stream{query}");
     let res = upstream(Method::Post, &url, &[("xi-api-key", secret(env, "ELEVENLABS_API_KEY")), ("content-type", "application/json".into())], Some(body)).await;
-    paid_call(env, db, &a, &call, cost, res, "application/octet-stream", &traced, chars as u64).await
+    paid_call(env, db, &a, &call, cost, res, "application/octet-stream", &traced, chars as u64, Units { chars: chars as u64, ..Units::default() }).await
 }
 
 /// Percent-encodes a header value (a voice line can hold any letter of a nickname).
@@ -1040,7 +1156,8 @@ async fn voice_line(mut req: Request, env: &Env, db: &Db, a: Account) -> Result<
         return error(400, "invalid_request_error", "Unknown voice line.");
     };
     let eleven = s("engine") == "eleven";
-    let traced = track::Call::new(&req, "voice_line", &s("model"), a.id);
+    let mut traced = track::Call::new(&req, "voice_line", &s("model"), a.id);
+    traced.provider = core::usage::provider("voice_line", eleven);
     let t = now();
     let refusal = if !eleven && let Err(r) = rules::check_tts_model(&s("model")) {
         Some(r)
@@ -1050,13 +1167,13 @@ async fn voice_line(mut req: Request, env: &Env, db: &Db, a: Account) -> Result<
         None
     };
     if let Some(r) = refusal {
-        track::refused(env, &traced, r.status, r.kind);
+        track::refused(env, &traced, r.status, r.kind).await;
         return refuse(r);
     }
     let call = core::random_hex(12);
     if !a.unlimited() && !db.begin_call(&call, a.id, t).await? {
         let r = rules::refusal(429, "rate_limit_error", "Terlalu banyak permintaan aina berjalan bersamaan. Tunggu sebentar lalu coba lagi.");
-        track::refused(env, &traced, r.status, r.kind);
+        track::refused(env, &traced, r.status, r.kind).await;
         return refuse(r);
     }
     let lang = if s("lang") == "en" { "en" } else { "id" };
@@ -1074,15 +1191,16 @@ async fn voice_line(mut req: Request, env: &Env, db: &Db, a: Account) -> Result<
         Ok(r) => r,
         Err(e) => {
             end_call(db, &call).await;
-            track::write(env, &traced, Outcome::error());
+            track::record(env, &traced, Outcome::error()).await;
             return Err(e);
         }
     };
     let first_ms = now() - traced.start;
     let ok = res.status_code() < 300;
-    // Booked at no cost: the trace still shows how much these free lines are used.
+    // Free for the person (no credits), but aina pays the provider: the trace keeps that cost.
     let chars = text.chars().count() as u64;
-    track::write(env, &traced, if ok { Outcome::ok([chars, 0, 0, 0, 0], 0, first_ms, false) } else { Outcome::upstream(res.status_code(), first_ms) });
+    let cost = tts_cost(chars as usize, eleven);
+    track::record(env, &traced, if ok { Outcome::ok([chars, 0, 0, 0, 0], Units { chars, ..Units::default() }, cost, 0, first_ms, false) } else { Outcome::upstream(res.status_code(), first_ms) }).await;
     end_call(db, &call).await;
     let out = pass(res, "application/octet-stream")?;
     out.headers().set("x-aina-text", &pct(&text))?;
@@ -1095,7 +1213,7 @@ async fn voice_line(mut req: Request, env: &Env, db: &Db, a: Account) -> Result<
 async fn realtime_secret(mut req: Request, env: &Env, db: &Db, a: Account) -> Result<Response> {
     let traced = track::Call::new(&req, "realtime_session", "", a.id);
     if let Err(r) = gate(&req, db, &a, false).await? {
-        track::refused(env, &traced, r.status, r.kind);
+        track::refused(env, &traced, r.status, r.kind).await;
         return refuse(r);
     }
     let body: Value = req.json().await.unwrap_or(Value::Null);
@@ -1108,10 +1226,10 @@ async fn realtime_secret(mut req: Request, env: &Env, db: &Db, a: Account) -> Re
     let first_ms = now() - traced.start;
     let v: Value = res.json().await.unwrap_or(Value::Null);
     if status >= 300 {
-        track::write(env, &traced, Outcome::upstream(status, first_ms));
+        track::record(env, &traced, Outcome::upstream(status, first_ms)).await;
         return json_res(status, &v);
     }
-    track::write(env, &traced, Outcome::ok([0; 5], 0, first_ms, false));
+    track::record(env, &traced, Outcome::ok([0; 5], Units::default(), 0, 0, first_ms, false)).await;
     json_res(200, &json!({ "value": v["value"], "expires_at": v["expires_at"] }))
 }
 
@@ -1125,9 +1243,11 @@ async fn realtime_usage(mut req: Request, env: &Env, db: &Db, a: Account) -> Res
     let cost = badi_cloud_core::plans::realtime_cost(model, &v["usage"]);
     // The reply happened in the app's own session with OpenAI: no latency here, only what it used.
     traced.model = model.to_string();
-    let n = |k: &str| v["usage"][k].as_u64().unwrap_or(0);
-    track::write(env, &traced, Outcome::ok([n("input_tokens"), n("output_tokens"), 0, 0, 0], cost, 0, false));
-    db.spend(a.id, cost, now()).await?;
+    let t = core::usage::realtime_tokens(&v["usage"]);
+    let spent = db.spend(a.id, cost, now()).await;
+    let units = Units { audio_in: t.audio_in, audio_out: t.audio_out, ..Units::default() };
+    track::record(env, &traced, Outcome::ok([t.text_in, t.text_out, t.cached, 0, 0], units, cost, *spent.as_ref().unwrap_or(&0), 0, false)).await;
+    spent?;
     json_res(200, &json!({ "ok": true }))
 }
 
@@ -1301,6 +1421,11 @@ async fn fetch(req: Request, env: Env, ctx: Context) -> Result<Response> {
             json_res(200, &a.view(&db.catalog().await?, now()))
         }
         (Method::Delete, "/v1/account") => {
+            // The usage stays, under the account number only (aina-usage holds no email); the name on the
+            // leaderboard goes.
+            if let Some(u) = UsageDb::of(&env) {
+                let _ = u.leave(a.id).await;
+            }
             db.delete_user(a.id).await?;
             json_res(200, &json!({ "deleted": true }))
         }
@@ -1320,6 +1445,14 @@ async fn fetch(req: Request, env: Env, ctx: Context) -> Result<Response> {
         (Method::Post, "/v1/voice/line") => voice_line(req, &env, &db, a).await,
         (Method::Post, "/v1/realtime/client_secrets") => realtime_secret(req, &env, &db, a).await,
         (Method::Post, "/v1/realtime/usage") => realtime_usage(req, &env, &db, a).await,
+        (Method::Get, "/v1/leaderboard") => leaderboard(&req, &env, &a).await,
+        (Method::Put, "/v1/leaderboard") => leaderboard_join(req, &env, &a).await,
+        (Method::Delete, "/v1/leaderboard") => {
+            if let Some(u) = UsageDb::of(&env) {
+                u.leave(a.id).await?;
+            }
+            json_res(200, &json!({ "joined": false }))
+        }
         (Method::Post, p) if p.starts_with("/eleven/v1/text-to-speech/") && p.ends_with("/stream") => {
             let voice = p.trim_start_matches("/eleven/v1/text-to-speech/").trim_end_matches("/stream").to_string();
             eleven(req, &env, &db, a, &voice).await

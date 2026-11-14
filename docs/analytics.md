@@ -57,9 +57,16 @@ curl.exe -s "https://api.cloudflare.com/client/v4/accounts/d4d0be3bd86e0bc6cbfea
 | `blob7` | `stream` atau `whole` |
 | `double2` | HTTP status |
 | `double3`–`double7` | token input, output, cache read, cache write, web search (audio: `double3` = karakter atau byte) |
-| `double8` | biaya dalam kredit × 1000 |
+| `double8` | biaya API sungguhan (HPP) dalam **milli-rupiah** (rupiah × 1000). Sebelum 2026-11-14 tertulis "kredit × 1000", padahal isinya selalu rupiah. Kalimat suara gratis (`voice_line`) ikut berbiaya mulai 2026-11-14 |
 | `double9` | ms sampai byte/token pertama dari provider (0 = tidak diketahui) |
 | `double10` | ms total |
+| `double11` | kredit × 1000 yang dipotong dari akun (0 untuk akun unlimited dan kalimat gratis), mulai 2026-11-14 |
+| `double12`, `double13` | token audio masuk / keluar (realtime), mulai 2026-11-14 |
+| `double14`, `double15` | durasi audio yang ditranskrip (ms), karakter yang dibacakan, mulai 2026-11-14 |
+| `blob9` | provider: `anthropic`, `openai`, `elevenlabs`, mulai 2026-11-14 |
+
+Untuk laporan bisnis yang permanen dan pasti (tidak di-sample), pakai database `aina-usage`:
+[usage-analytics.md](usage-analytics.md).
 
 ## Query siap pakai
 
@@ -110,7 +117,7 @@ GROUP BY os ORDER BY n DESC
 ```sql
 SELECT blob1 AS route, blob2 AS model,
   SUM(_sample_interval) AS panggilan,
-  SUM(_sample_interval * double8) / 1000 AS kredit,
+  SUM(_sample_interval * double8) / 1000 AS hpp_rupiah,
   quantileWeighted(0.5)(double9, _sample_interval) AS p50_first_ms,
   quantileWeighted(0.95)(double10, _sample_interval) AS p95_total_ms
 FROM aina_ai_calls
@@ -136,7 +143,7 @@ GROUP BY hari ORDER BY hari
 ```
 
 ```sql
-SELECT index1 AS user_id, SUM(_sample_interval) AS panggilan, SUM(_sample_interval * double8) / 1000 AS kredit
+SELECT index1 AS user_id, SUM(_sample_interval) AS panggilan, SUM(_sample_interval * double8) / 1000 AS hpp_rupiah
 FROM aina_ai_calls WHERE timestamp > NOW() - INTERVAL '30' DAY AND blob5 = 'ok'
 GROUP BY user_id ORDER BY kredit DESC LIMIT 20
 ```

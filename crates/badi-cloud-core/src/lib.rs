@@ -5,6 +5,7 @@
 pub mod plans;
 pub mod rules;
 pub mod stats;
+pub mod usage;
 pub mod voice_lines;
 pub mod web;
 

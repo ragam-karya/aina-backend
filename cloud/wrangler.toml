@@ -58,6 +58,15 @@ database_name = "badi-cloud"
 database_id = "ac19a76a-76ff-4d73-b13d-bb2aab5d856c"
 migrations_dir = "migrations"
 
+# AI usage for analytics and the business (src/usage.rs, docs/usage-analytics.md): every AI call and its
+# daily totals, and the leaderboard. Its own database so it can be queried, exported or moved alone.
+# Migrations: wrangler d1 migrations apply aina-usage --remote
+[[d1_databases]]
+binding = "USAGE"
+database_name = "aina-usage"
+database_id = "869098ed-6ca0-453a-b487-351fc3c96e91"
+migrations_dir = "migrations-usage"
+
 # Secrets (never in this file): wrangler secret put <NAME>
 #   ANTHROPIC_API_KEY, OPENAI_API_KEY, ELEVENLABS_API_KEY, COMPOSIO_API_KEY (ak_…),
 #   COMPOSIO_AUTH_CONFIGS (JSON, optional white-label), MIDTRANS_SERVER_KEY (sandbox SB-Mid-server-… first),
